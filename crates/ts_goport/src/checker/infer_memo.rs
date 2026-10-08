@@ -21,8 +21,8 @@
 //! - R2-R4, R6, R7 during the walk: it made no type, symbol, signature,
 //!   mapper, index info, predicate, instantiation map or inference context,
 //!   ran no nested walk, left both instantiation counts as they were, reset
-//!   no count, added no diagnostic, added no reliability bits, and read no
-//!   transient state (taints).
+//!   no count, added no diagnostic (also no deferred one), added no
+//!   reliability bits, and read no transient state (taints).
 //! - R8 tuning: the walk took at least `min_steps` steps, and an earlier walk
 //!   of that many steps marked the target.
 //! - A hit writes each changed info's candidate lists, priority and
@@ -113,7 +113,7 @@ pub enum Rule {
     Instantiated,
     /// R3: an instantiation count reset ran (checker.go:2287, :2550, :7735).
     Reset,
-    /// R4: a diagnostic or suggestion was added.
+    /// R4: a diagnostic, suggestion or deferred diagnostic was added.
     Diagnostic,
     /// R5: started inside an instantiation (`activeMappers` not empty).
     InInstantiation,
@@ -422,6 +422,7 @@ struct Effects {
     resets: u32,
     diagnostics: i32,
     suggestions: i32,
+    deferred_diagnostics: usize,
 }
 
 /// Verify mode: sizes of the caches and stacks that a walk can fill.
@@ -486,6 +487,7 @@ impl Checker {
             resets: self.infer_memo.resets,
             diagnostics: self.diagnostics.count,
             suggestions: self.suggestion_diagnostics.count,
+            deferred_diagnostics: self.deferred_diagnostic_callbacks.len(),
         }
     }
 
@@ -669,7 +671,9 @@ impl Checker {
         );
         add(after.resets != before.resets, Rule::Reset);
         add(
-            after.diagnostics != before.diagnostics || after.suggestions != before.suggestions,
+            after.diagnostics != before.diagnostics
+                || after.suggestions != before.suggestions
+                || after.deferred_diagnostics != before.deferred_diagnostics,
             Rule::Diagnostic,
         );
         add(!added_reliability.is_empty(), Rule::Reliability);
