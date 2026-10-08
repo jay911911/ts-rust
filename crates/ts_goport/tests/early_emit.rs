@@ -272,13 +272,15 @@ fn build_no_emit_on_error_task_finishes_when_its_emit_ends() {
     }
 }
 
-/// k2gaps1 (G3): the other way round. p1 is the big `noEmitOnError` writer,
-/// whose new output adds `v2`; p2 is a small emit-only project; p3 reads
-/// `v2` from p1's output without a reference (`--builders 2`). Go's p1
-/// writes when its emit ends, after p2 ended and its builder took p3, so
-/// p3 loads before p1 writes: TS2305 (Go N gives that). Before, the port
-/// emitted p1 and wrote its outputs as soon as p1's check ended, so p3 saw
-/// `v2` (exit 0). With and without the Go clock.
+/// k2gaps1 (G3): the other way round. p1 is the big `noEmitOnError` writer
+/// (3,000 modules), whose new output adds `v2`; p2 only emits a smaller
+/// file (600 modules); p3 reads `v2` from p1's output without a reference
+/// (`--builders 2`). Go's p1 writes when its emit ends, after p2 ended and
+/// its builder took p3, so p3 loads before p1 writes: TS2305 (Go N gives
+/// that, also with 16 copies at once). Before, the port emitted p1 and
+/// wrote its outputs as soon as p1's check ended, so p3 saw `v2` (exit 0).
+/// p2 ends after p1's check, so the Go clock alone does not give TS2305.
+/// With and without the Go clock.
 #[test]
 fn build_no_emit_on_error_writer_writes_when_its_emit_ends() {
     for clock in [CLOCK_ON, CLOCK_OFF] {
@@ -293,9 +295,10 @@ fn build_no_emit_on_error_writer_writes_when_its_emit_ends() {
         }
         solution.write(
             "p1/src/index.ts",
-            &(big_module("v1", 1500) + "export const v1 = 1;\n"),
+            &(big_module("v1", 3000) + "export const v1 = 1;\n"),
         );
         solution.write("p2/src/index.ts", "export const s = 1;\n");
+        solution.write("p2/src/mid.ts", &big_module("m1", 600));
         solution.write(
             "p3/src/a.ts",
             "import { v1, v2 } from \"../../p1/dist/index\";\nexport const a = v1 + v2;\n",
@@ -303,12 +306,13 @@ fn build_no_emit_on_error_writer_writes_when_its_emit_ends() {
         solution.build(&["tsconfig.json"], CLOCK_ON);
         solution.write(
             "p1/src/index.ts",
-            &(big_module("v2", 1500) + "export const v1 = 1;\nexport const v2 = 2;\n"),
+            &(big_module("v2", 3000) + "export const v1 = 1;\nexport const v2 = 2;\n"),
         );
         solution.write(
             "p2/src/index.ts",
             "export const s = 1;\nexport const t = 2;\n",
         );
+        solution.write("p2/src/mid.ts", &big_module("m2", 600));
         for project in ["p1", "p2"] {
             assert_eq!(
                 solution.build(&[project, "--noEmit"], CLOCK_ON),
@@ -330,12 +334,13 @@ fn build_no_emit_on_error_writer_writes_when_its_emit_ends() {
 }
 
 /// k2gaps1 (G1): `tsc -b` with the default 4 builders on p0 p1 p2 p3. p0
-/// has a big file that the edit leaves alone and a small edited file, so
-/// its load is long and its check is short. p1 and p2 only emit, and p2's
+/// has a big file that the edit leaves alone (3,000 modules) and a small
+/// edited file, so its load is long and its check is short. p1 and p2 only emit, and p2's
 /// new output adds `v2`. p3 references p0, and reads `v2` from p2's output
 /// without a reference. Go's builders load p0, p1 and p2 at the same time;
 /// p2 ends long before p0 is built, and p3 starts when p0 is built: exit 0,
-/// no output (Go N gives that). Here the programs load one after another,
+/// no output (Go N gives that, also with 16 copies at once; with 1,500
+/// modules Go gave TS2305 once in 32). Here the programs load one after another,
 /// so p2's load waits for p0's and p1's. Before the Go clock
 /// (`orchestrator.rs` `GoClock`), p0 finished first and p3 loaded before
 /// p2 wrote (TS2305).
@@ -357,7 +362,7 @@ fn build_downstream_task_loads_after_writers_that_ended() {
         ),
     );
     solution.write("p0/src/index.ts", "export const z = 0;\n");
-    solution.write("p0/src/static.ts", &big_module("s", 1500));
+    solution.write("p0/src/static.ts", &big_module("s", 3000));
     solution.write("p1/src/index.ts", "export const s = 1;\n");
     solution.write("p2/src/index.ts", "export const v1 = 1;\n");
     solution.write(
