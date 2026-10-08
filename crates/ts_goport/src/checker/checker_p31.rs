@@ -211,52 +211,60 @@ impl Checker {
             return self.cached_types.get(&key).copied().unwrap_or_default();
         }
         self.ty_mut(t).object_flags |= ObjectFlags::IDENTICAL_BASE_TYPE_CALCULATED;
-        if self.ty(target).object_flags.intersects(ObjectFlags::CLASS) {
-            let base_type_node = self.get_base_type_node_of_class(target);
-            // A base type expression may circularly reference the class itself (e.g. as an argument to function call), so we only
-            // check for base types specified as simple qualified names.
-            if base_type_node.is_some()
-                && !is_identifier(base_type_node.expression())
-                && !is_property_access_expression(base_type_node.expression())
-            {
-                return TypeId::NIL;
+        // infmemo1 (R5, U1): an early-flag window (Go :28560-28588). A call
+        // inside reads the flag and gets nil before the store.
+        self.infer_memo.early_flags_depth += 1;
+        let result = 'window: {
+            if self.ty(target).object_flags.intersects(ObjectFlags::CLASS) {
+                let base_type_node = self.get_base_type_node_of_class(target);
+                // A base type expression may circularly reference the class itself (e.g. as an argument to function call), so we only
+                // check for base types specified as simple qualified names.
+                if base_type_node.is_some()
+                    && !is_identifier(base_type_node.expression())
+                    && !is_property_access_expression(base_type_node.expression())
+                {
+                    break 'window TypeId::NIL;
+                }
             }
-        }
-        let bases = self.get_base_types(target);
-        if bases.len() != 1 {
-            return TypeId::NIL;
-        }
-        let symbol = self.ty(t).symbol;
-        let members = self.get_members_of_symbol(symbol);
-        if self.symbols.len(members) != 0 {
-            // If the interface has any members, they may subtype members in the base, so we should do a full structural comparison
-            return TypeId::NIL;
-        }
-        let instantiated_base: TypeId;
-        let type_parameters = self
-            .ty(target)
-            .as_interface_type()
-            .type_parameters()
-            .to_vec();
-        if type_parameters.is_empty() {
-            instantiated_base = bases[0];
-        } else {
-            let type_arguments = self.get_type_arguments(t);
-            let mapper =
-                self.new_type_mapper(&type_parameters, &type_arguments[..type_parameters.len()]);
-            instantiated_base = self.instantiate_type(bases[0], mapper);
-        }
-        let mut instantiated_base = instantiated_base;
-        let last = {
-            let type_arguments = self.type_arguments_of(t);
-            (type_arguments.len() > type_parameters.len())
-                .then(|| type_arguments.last().copied().unwrap_or(TypeId::NIL))
+            let bases = self.get_base_types(target);
+            if bases.len() != 1 {
+                break 'window TypeId::NIL;
+            }
+            let symbol = self.ty(t).symbol;
+            let members = self.get_members_of_symbol(symbol);
+            if self.symbols.len(members) != 0 {
+                // If the interface has any members, they may subtype members in the base, so we should do a full structural comparison
+                break 'window TypeId::NIL;
+            }
+            let instantiated_base: TypeId;
+            let type_parameters = self
+                .ty(target)
+                .as_interface_type()
+                .type_parameters()
+                .to_vec();
+            if type_parameters.is_empty() {
+                instantiated_base = bases[0];
+            } else {
+                let type_arguments = self.get_type_arguments(t);
+                let mapper = self
+                    .new_type_mapper(&type_parameters, &type_arguments[..type_parameters.len()]);
+                instantiated_base = self.instantiate_type(bases[0], mapper);
+            }
+            let mut instantiated_base = instantiated_base;
+            let last = {
+                let type_arguments = self.type_arguments_of(t);
+                (type_arguments.len() > type_parameters.len())
+                    .then(|| type_arguments.last().copied().unwrap_or(TypeId::NIL))
+            };
+            if let Some(last) = last {
+                instantiated_base =
+                    self.get_type_with_this_argument(instantiated_base, last, false);
+            }
+            self.cached_types.insert(key, instantiated_base);
+            instantiated_base
         };
-        if let Some(last) = last {
-            instantiated_base = self.get_type_with_this_argument(instantiated_base, last, false);
-        }
-        self.cached_types.insert(key, instantiated_base);
-        instantiated_base
+        self.infer_memo.early_flags_depth -= 1;
+        result
     }
 
     // Go: checker/checker.go:28592 getModifiersTypeFromMappedType

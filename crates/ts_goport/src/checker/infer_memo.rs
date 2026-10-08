@@ -196,8 +196,10 @@ pub enum Rule {
     /// (checker.go:9128).
     OverloadFailure,
     /// R5: started inside an early-flag window: `isDiscriminantProperty`
-    /// (relater.go:1084), `isUnknownLikeUnionType` (checker.go:28270) and,
-    /// after the int52 rebase, `getReducedType` (checker.go:22189).
+    /// (relater.go:1084), `isUnknownLikeUnionType` (checker.go:28270),
+    /// `getReducedType` (checker.go:22190, C-A), `resolveDeclaredMembers`
+    /// (checker.go:19953) and `getSingleBaseForNonAugmentingSubtype`
+    /// (checker.go:28560, U1).
     EarlyFlags,
     /// R7: a getter returned a value that is not the one in its link
     /// (checker.go:16875-16878, :27949-27952).
@@ -407,7 +409,8 @@ pub struct InferMemo {
     pub return_taints: u32,
     /// Peeks of an empty slot (R7, K9).
     pub peek_taints: u32,
-    /// Purges so far (R9).
+    /// Purges so far (R9), and the P5 writes that purged nothing. A walk
+    /// that sees it change is not stored.
     pub purges: u32,
     /// The summed `Succeeded` flips of the relations at the last check (P3).
     pub relation_flips: u32,
@@ -538,11 +541,15 @@ impl InferMemo {
     /// P5: `assignContextualParameterTypes` sets the type parameters or the
     /// `this` parameter of `sig`. Only an entry stored after `sig` was made
     /// can have read it, so there is nothing to purge when no walk was
-    /// stored since. A walk that runs now is not stored anyway: Go assigns
-    /// inside `checkExpression`, which resets the count (R3).
+    /// stored since (go-model.md 15.7). A walk that runs now can have read
+    /// `sig` too, so it is not stored (`Rule::Purged`) in both cases.
     pub fn contextual_write(&mut self, sig: SignatureId) {
         if self.signature_stores.get(&sig) != Some(&self.counts[Stat::Stores as usize]) {
             self.purge(Purge::Contextual);
+        } else if self.mode != InferMemoMode::Off
+            && self.ignored_rules & 1 << (RULES + Purge::Contextual as usize) == 0
+        {
+            self.purges = self.purges.wrapping_add(1);
         }
     }
 
@@ -1364,10 +1371,8 @@ const s: { test: true } = r.got;
     /// C-A of the round 3 check: `getReducedType(A & B)` sets
     /// `IsNeverIntersectionComputed` before it tests the properties
     /// (checker.go:22189-22193), so a walk inside reads `A & B` where Go's
-    /// later walk reads `never`. The counter belongs in `checker_p24.rs`, an
-    /// int52 file.
+    /// later walk reads `never`.
     #[test]
-    #[ignore = "needs the getReducedType early-flag counter in checker_p24.rs (after the int52 rebase)"]
     fn reduction_in_progress_is_not_stored() {
         assert_rule_acts(
             "ca",
@@ -1432,6 +1437,84 @@ const n: string = v2;
             &[2322],
             "purge_lazy_store",
             "purge_lazy_store",
+            false,
+        );
+    }
+
+    /// P4 H1 (go-model.md 15.8, Go :21777): `u.p` creates the union
+    /// property `p` of `X | Y`. The members of `X` need its base expression,
+    /// which reads `u.p` again: the inner call stores its property first,
+    /// and the outer call stores another symbol. The walks that can read the
+    /// inner one run inside the base types window, so the output does not
+    /// change without the purge.
+    #[test]
+    fn union_property_reentry_purges() {
+        assert_rule_acts(
+            "h1",
+            "declare function mk<T>(x: { p: T }): new () => { p: T };
+declare function id<T>(x: { p: T }): T;
+class X extends mk({ p: id({ p: u.p }) }) { q = 1 }
+type Y = { p: number };
+declare const u: X | Y;
+const a = u.p;
+const v = id({ p: u.p });
+const w = id({ p: u.p });
+const z: boolean = w;
+",
+            &[2310, 2506, 2339, 2339, 2339, 2339],
+            "purge_lazy_store",
+            "purge_lazy_store",
+            false,
+        );
+    }
+
+    /// P4 H5 (go-model.md 15.8, Go :22185): the relation of `x` reduces
+    /// `(A & B) | C`. The reduction of `A & B` reads `typeof va`, whose
+    /// check reduces the union again and stores it unchanged; the outer call
+    /// then stores `C`. The early-flag window (C-A) also covers the walks
+    /// that read the inner value, so the output does not change without the
+    /// purge.
+    #[test]
+    fn union_reduction_reentry_purges() {
+        assert_rule_acts(
+            "h5",
+            r#"declare function g<T>(x: { w: T }): [T, "a"];
+declare const x: (A & B) | C;
+const top1: { w: boolean } = x;
+const va = g(x);
+const again = g(x);
+const n: number = again[0];
+type A = { w: string; kind: (typeof va)[1] };
+type B = { kind: "b" };
+type C = { w: boolean };
+"#,
+            &[2345, 2322],
+            "purge_lazy_store",
+            "purge_lazy_store",
+            false,
+        );
+    }
+
+    /// R5 U1 (go-model.md 15.8, Go :28560-28588): the relation of `s`
+    /// normalizes `Sub<1>`, which sets `IdenticalBaseTypeCalculated`, then
+    /// resolves the bases of `Sub`, which check `v`. The walk of `v` runs in
+    /// the window. It is in the base types window too, so the output does not
+    /// change without the counter.
+    #[test]
+    fn single_base_in_progress_is_not_stored() {
+        assert_rule_acts(
+            "u1",
+            r#"declare function mk<T>(x: { p: T }): T;
+declare const s: Sub<1>;
+const t: Base<number> = s;
+const v = mk({ p: "a" });
+const w = mk({ p: "a" });
+interface Base<T> { p: T }
+interface Sub<X> extends Base<typeof v> {}
+"#,
+            &[2322],
+            "early_flags",
+            "lost_early_flags",
             false,
         );
     }

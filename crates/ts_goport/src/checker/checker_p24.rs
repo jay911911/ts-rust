@@ -196,7 +196,13 @@ impl Checker {
         );
         if prop.is_some() {
             let name = table_key_name(name);
-            self.symbols.set(cache, &name, prop);
+            // infmemo1 (P4, Go :21777): Go `cache[name] = prop`. The slot is
+            // full only when an inner call stored first.
+            if !self.symbols.set_if_absent(cache, &name, prop) {
+                let prev_slot = self.symbols.get_name(cache, &name);
+                self.infer_memo.lazy_store(prev_slot != prop);
+                self.symbols.set(cache, &name, prop);
+            }
             // Propagate an entry from the non-augmented cache to the augmented cache unless the property is partial.
             if skip_object_function_property_augment
                 && !self.sym(prop).check_flags.intersects(CheckFlags::PARTIAL)
@@ -757,7 +763,13 @@ impl Checker {
     pub fn get_apparent_type_of_mapped_type(&mut self, t: TypeId) -> TypeId {
         if self.ty(t).as_mapped_type().resolved_apparent_type.is_nil() {
             let resolved = self.get_resolved_apparent_type_of_mapped_type(t);
-            self.ty_mut(t).as_mapped_type_mut().resolved_apparent_type = resolved;
+            let prev_slot = std::mem::replace(
+                &mut self.ty_mut(t).as_mapped_type_mut().resolved_apparent_type,
+                resolved,
+            );
+            // infmemo1 (P4, Go :22125): an inner call stored first.
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != resolved);
         }
         self.ty(t).as_mapped_type().resolved_apparent_type
     }
@@ -822,9 +834,16 @@ impl Checker {
                     this_argument,
                     true, /*needApparentType*/
                 );
-                self.ty_mut(t)
-                    .as_intersection_type_mut()
-                    .resolved_apparent_type = resolved;
+                let prev_slot = std::mem::replace(
+                    &mut self
+                        .ty_mut(t)
+                        .as_intersection_type_mut()
+                        .resolved_apparent_type,
+                    resolved,
+                );
+                // infmemo1 (P4, Go :22158): an inner call stored first.
+                self.infer_memo
+                    .lazy_store(prev_slot.is_some() && prev_slot != resolved);
             }
             return self.ty(t).as_intersection_type().resolved_apparent_type;
         }
@@ -836,7 +855,10 @@ impl Checker {
         if result.is_nil() {
             result =
                 self.get_type_with_this_argument(t, this_argument, true /*needApparentType*/);
-            self.cached_types.insert(key, result);
+            let prev_slot = self.cached_types.insert(key, result);
+            // infmemo1 (P4, Go :22166): an inner call stored first.
+            self.infer_memo
+                .lazy_store(prev_slot.is_some_and(|prev| prev.is_some() && prev != result));
         }
         result
     }
@@ -882,7 +904,13 @@ impl Checker {
                     return reduced_type;
                 }
                 let reduced_type = self.get_reduced_union_type(t);
-                self.ty_mut(t).as_union_type_mut().resolved_reduced_type = reduced_type;
+                let prev_slot = std::mem::replace(
+                    &mut self.ty_mut(t).as_union_type_mut().resolved_reduced_type,
+                    reduced_type,
+                );
+                // infmemo1 (P4, Go :22185): an inner call stored first.
+                self.infer_memo
+                    .lazy_store(prev_slot.is_some() && prev_slot != reduced_type);
                 return reduced_type;
             }
         } else if flags.intersects(TypeFlags::INTERSECTION) {
@@ -892,12 +920,17 @@ impl Checker {
                 .intersects(ObjectFlags::IS_NEVER_INTERSECTION_COMPUTED)
             {
                 self.ty_mut(t).object_flags |= ObjectFlags::IS_NEVER_INTERSECTION_COMPUTED;
+                // infmemo1 (R5, C-A): an early-flag window (Go :22190-22192).
+                // A call inside reads the flag and gets `t`, where Go's later
+                // call can get `never`.
+                self.infer_memo.early_flags_depth += 1;
                 let types = self.ty(t).types().to_vec();
                 if !self.is_mapping_of_same_object_type(&types)
                     && self.some_property_reduces_to_never(t)
                 {
                     self.ty_mut(t).object_flags |= ObjectFlags::IS_NEVER_INTERSECTION;
                 }
+                self.infer_memo.early_flags_depth -= 1;
             }
             if self
                 .ty(t)
@@ -1474,15 +1507,20 @@ impl Checker {
             let target = self.ty(t).as_type_parameter().target;
             if target.is_some() {
                 let target_default = self.get_resolved_type_parameter_default(target);
-                if target_default.is_some() {
+                let resolved = if target_default.is_some() {
                     let mapper = self.ty(t).as_type_parameter().mapper;
-                    let instantiated = self.instantiate_type(target_default, mapper);
-                    self.ty_mut(t).as_type_parameter_mut().resolved_default_type = instantiated;
+                    self.instantiate_type(target_default, mapper)
                 } else {
-                    let no_constraint_type = self.no_constraint_type;
-                    self.ty_mut(t).as_type_parameter_mut().resolved_default_type =
-                        no_constraint_type;
-                }
+                    self.no_constraint_type
+                };
+                let prev_slot = std::mem::replace(
+                    &mut self.ty_mut(t).as_type_parameter_mut().resolved_default_type,
+                    resolved,
+                );
+                // infmemo1 (P4, Go :22404, :22406): an inner call stored
+                // first.
+                self.infer_memo
+                    .lazy_store(prev_slot.is_some() && prev_slot != resolved);
             } else {
                 // To block recursion, set the initial value to the resolvingDefaultType.
                 let resolving_default_type = self.resolving_default_type;
