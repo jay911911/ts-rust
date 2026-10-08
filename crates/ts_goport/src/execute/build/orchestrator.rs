@@ -60,7 +60,7 @@ use crate::execute::build::command_line::ParsedBuildCommandLine;
 use crate::execute::build::config_prefetch::{
     BuildInfoRead, BuildInfoResult, BuildInfoSlot, PrefetchPool,
 };
-use crate::execute::build::host::BuildHost;
+use crate::execute::build::host::{BuildHost, ParseClock};
 use crate::execute::build::shared_outputs::{PathKeys, outputs_overlap};
 use crate::execute::incremental::build_info::{BuildInfo, is_build_info_file_name_default_library};
 use crate::execute::incremental::incremental::new_build_info_reader;
@@ -894,7 +894,7 @@ impl Orchestrator {
     // PORT: see the top comment for the schedule. Go `numRoutines <= 0`
     // starts no builder, so no task runs; that is kept.
     fn build_all_tasks(&self, order: &[String], build_result: &mut OrchestratorResult) {
-        #[derive(Clone, Copy, PartialEq, Eq)]
+        #[derive(Clone, Copy, PartialEq, Eq, Debug)]
         enum State {
             NotTaken,
             Waiting,
@@ -943,6 +943,7 @@ impl Orchestrator {
         let mut signals = vec![0usize; paths.len()];
         let mut compiled = VecDeque::new();
         let mut clock = GoClock::new(paths.len(), num_routines);
+        *self.host.parse_clock.borrow_mut() = ParseClock::default();
         // PORT: not in Go (determinism). True when the tasks can see each
         // other's writes (`outputs_overlap`), so they finish in build order.
         // It is found when the first task compiles: until then every task
@@ -1057,6 +1058,8 @@ impl Orchestrator {
                 continue;
             }
             let (time, index, event) = next.expect("an event when there is no wait");
+            let trace = std::env::var("K2GAPS1_TRACE").is_ok();
+            let trace_start = clock.origin.elapsed();
             // The task waits for the check and emit that it started; with
             // none, it is compiled now.
             let arm = |task: &BuildTask,
@@ -1088,10 +1091,20 @@ impl Orchestrator {
                         self.create_task_builder_status_reporter(),
                         self.create_task_diagnostic_reporter(),
                     ));
-                    states[index] = if clean {
+                    self.host.parse_clock.borrow_mut().step =
+                        go_clock.then_some((clock.origin, clock.delay[index]));
+                    let k2s = std::time::Instant::now();
+                    let compiles = if clean {
                         task.clean_project(self, &paths[index]);
-                        State::Done
-                    } else if !task.build_project_start(self, &paths[index]) {
+                        false
+                    } else {
+                        task.build_project_start(self, &paths[index])
+                    };
+                    if std::env::var("K2GAPS1_TRACE").is_ok() {
+                        eprintln!("TRACEP step {index} {:?}", k2s.elapsed());
+                    }
+                    clock.took_parses(index, &mut self.host.parse_clock.borrow_mut());
+                    states[index] = if !compiles {
                         State::Done
                     } else if testing {
                         task.build_project_finish(self, &paths[index]);
@@ -1127,6 +1140,23 @@ impl Orchestrator {
                     clock.built(index);
                     self.task_built(&mut task);
                 }
+            }
+            if trace {
+                let kind = match event {
+                    Event::Take => "take",
+                    Event::Start => "start",
+                    Event::Finish => "finish",
+                };
+                eprintln!(
+                    "TRACE {kind} {index} go={:?} port={:?}..{:?} delay={:?} end={:?} done={:?} state={}",
+                    time,
+                    trace_start,
+                    clock.origin.elapsed(),
+                    clock.delay[index],
+                    clock.end[index],
+                    clock.done[index],
+                    states[index] as u8
+                );
             }
         }
         // The kept released programs free now, unless the process ends
@@ -1586,6 +1616,14 @@ impl GoClock {
     /// A step of task `index` at Go time `time` starts now.
     fn step(&mut self, index: usize, time: Duration) {
         self.delay[index] = self.origin.elapsed().saturating_sub(time);
+    }
+
+    /// The start step of task `index` took kept parses (`ParseClock`): it
+    /// cannot be ahead of the Go time when they were made, so its Go time
+    /// moves on by how far it was ahead.
+    fn took_parses(&mut self, index: usize, parses: &mut ParseClock) {
+        parses.step = None;
+        self.delay[index] = self.delay[index].saturating_sub(std::mem::take(&mut parses.behind));
     }
 
     /// The barrier of task `index` was sent (`notify_when_compiled`).

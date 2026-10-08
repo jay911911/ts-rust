@@ -956,6 +956,7 @@ impl BuildTask {
         orchestrator: &dyn BuildTaskOrchestrator,
         path: &Path,
     ) -> bool {
+        let k2t0 = std::time::Instant::now();
         self.errors = Vec::new();
         self.held_file_versions = Vec::new();
         let command = orchestrator.command();
@@ -1056,14 +1057,17 @@ impl BuildTask {
         }
         compile_times.borrow_mut().build_info_read_time = elapsed(&*sys, build_info_read_start);
         let parse_start = sys.now();
+        let k2t = std::time::Instant::now();
         // Go: compiler.NewProgram(compiler.ProgramOptions{Config, Host})
         // PORT: in `tsc -b --watch` the new parses of files that an earlier
         // build published are freeable file versions (watchfree1,
         // `ast::set_watch_process`).
         let np = crate::execute::execute_tsc::new_frontend_program(compiler_host, resolved);
+        let k2ta = std::time::Instant::now();
         crate::program::mark_freeable_parses(&np);
         let program = crate::program::new_program_version(&np, None);
         drop(np);
+        let k2tb = std::time::Instant::now();
         compile_times.borrow_mut().parse_time = elapsed(&*sys, parse_start);
         let written_build_info: WrittenBuildInfo = Arc::default();
         let deferred_writes = (!sys.emit_writes_through_osvfs()).then(DeferredWrites::default);
@@ -1113,7 +1117,20 @@ impl BuildTask {
             // (`Program::take_started_check_time`).
             // PORT: testing. A test finishes the task at once, and its emit
             // starts there, as without the early start.
+            let k2t1 = std::time::Instant::now();
             incremental_program.start_check();
+            let k2t2 = std::time::Instant::now();
+            if std::env::var("K2GAPS1_TRACE").is_ok() {
+                eprintln!(
+                    "TRACEP {} pre={:?} frontend={:?} version={:?} inc={:?} start_check={:?}",
+                    self.config,
+                    k2t - k2t0,
+                    k2ta - k2t,
+                    k2tb - k2ta,
+                    k2t1 - k2tb,
+                    k2t2 - k2t1
+                );
+            }
             if emit_started {
                 buffer_early_emit_writes(|| {
                     incremental_program.start_emit(EmitOptions {
@@ -1121,6 +1138,9 @@ impl BuildTask {
                         ..EmitOptions::default()
                     });
                 });
+            }
+            if std::env::var("K2GAPS1_TRACE").is_ok() {
+                eprintln!("TRACEP {} start_emit={:?}", self.config, k2t2.elapsed());
             }
             incremental_program
         };

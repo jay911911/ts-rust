@@ -321,6 +321,47 @@ pub struct BuildHost {
     // read before the write (orchestrator.rs `BuildInfoPrefetch`). The
     // orchestrator clears it at the start and the end of each build.
     pub written: Arc<WrittenPaths>,
+    // PORT: not in Go (the Go clock of `tsc -b`, see `ParseClock`).
+    pub parse_clock: RefCell<ParseClock>,
+}
+
+/// PORT: not in Go. The Go time of the `.d.ts` and `.json` parses that
+/// `source_files` keeps, for the Go clock of `build_all_tasks`
+/// (orchestrator.rs `GoClock`). Go's `parseCache` locks each entry while
+/// one task parses it, so every Go task that needs the file waits for that
+/// parse: tasks that load at the same time all wait for the default lib
+/// files, for example. Here the first program parses them, and a later
+/// program takes the kept parse at once. So a task that takes a kept parse
+/// cannot be ahead of the Go time when that parse was made: `behind` is how
+/// far the current task step was ahead, and the orchestrator moves the
+/// task's Go time on by it.
+#[derive(Default)]
+pub struct ParseClock {
+    /// The current task step: the start of the loop and the task's delay
+    /// (the time here minus the Go time). None outside a step, and without
+    /// the clock.
+    pub step: Option<(std::time::Instant, Duration)>,
+    /// The Go time when each kept parse was made, by file name.
+    made: FxHashMap<String, Duration>,
+    /// The most that the current step's Go time was behind the Go time of a
+    /// kept parse that it took.
+    pub behind: Duration,
+}
+
+impl ParseClock {
+    /// Notes that the current step took the kept parse of `file_name`; it
+    /// made it when `parsed`.
+    fn took(&mut self, file_name: &str, parsed: bool) {
+        let Some((origin, delay)) = self.step else {
+            return;
+        };
+        let now = origin.elapsed().saturating_sub(delay);
+        if parsed {
+            self.made.insert(file_name.to_owned(), now);
+        } else if let Some(&made) = self.made.get(file_name) {
+            self.behind = self.behind.max(made.saturating_sub(now));
+        }
+    }
 }
 
 /// PORT: not in Go (perf). A set of paths (`BuildHost::written`), with a
@@ -398,6 +439,7 @@ impl BuildHost {
             watch_sources_before_config_change: RefCell::default(),
             m_times: Arc::default(),
             written: Arc::default(),
+            parse_clock: RefCell::default(),
         }
     }
 
@@ -825,9 +867,11 @@ impl CompilerHost for BuildHost {
             // build writes it; a downstream program of the same cycle then
             // gets that parse, not the new text (bwsig1: hono
             // `runtime-tests/*` build infos after a `removeComments` edit).
-            return self.source_files.load_or_store(
+            let mut parsed = false;
+            let file = self.source_files.load_or_store(
                 SourceFileCacheKey(opts.clone()),
                 |key| {
+                    parsed = true;
                     if watch {
                         return self.watch_source_file(&key.0);
                     }
@@ -839,6 +883,8 @@ impl CompilerHost for BuildHost {
                 },
                 false, /* allowZero */
             );
+            self.parse_clock.borrow_mut().took(&opts.file_name, parsed);
+            return file;
         }
         if watch {
             return self.watch_source_file(opts);
