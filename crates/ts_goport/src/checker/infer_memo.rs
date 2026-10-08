@@ -49,8 +49,9 @@ pub enum InferMemoMode {
     Verify,
 }
 
-/// The mode when `GOPORT_INFERMEMO` is unset.
-const DEFAULT_MODE: InferMemoMode = InferMemoMode::On;
+/// The mode when `GOPORT_INFERMEMO` is unset. goport-infmemo1-vfy: verify
+/// (test evidence only, never merged).
+const DEFAULT_MODE: InferMemoMode = InferMemoMode::Verify;
 
 /// At most this many infos in a key (port tuning, as tsrs).
 const MAX_INFOS: usize = 8;
