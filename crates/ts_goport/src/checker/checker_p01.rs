@@ -1146,6 +1146,8 @@ pub struct Checker {
     pub(crate) matching_reference_memo: crate::checker::flow_p2::MatchingReferenceMemo,
     /// flowskip1: the index and state of the flow walk skip (flow_skip.rs).
     pub flow_skip: crate::checker::flow_skip::FlowSkip,
+    /// infmemo1: the memo of top-level inference walks (infer_memo.rs).
+    pub infer_memo: crate::checker::infer_memo::InferMemo,
     /// PERF: not in Go. Counts the merges (`merge_symbol` and
     /// `record_merged_symbol`), so a memo of a merged symbol or of the flags
     /// a merge adds knows when to read them again (`MatchingReferenceMemo`,
@@ -1636,6 +1638,7 @@ impl Checker {
             alternative_module_import_misses: FxHashSet::default(),
             matching_reference_memo: Default::default(),
             flow_skip: Default::default(),
+            infer_memo: Default::default(),
             merge_version: 0,
             symbols,
             types: ChunkedArena::with_nil(Type::default()),

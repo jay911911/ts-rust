@@ -1457,6 +1457,8 @@ impl Checker {
         // that could cause infinite recursion. Instead, return anySignature.
         let signature;
         if self.signature_links.get(call_target).resolved_signature == self.resolving_signature {
+            // infmemo1 R7: a resolvingSignature read.
+            self.infer_memo.taints += 1;
             signature = self.resolving_signature;
         } else {
             signature = self.get_resolved_signature(call_target, None, CheckMode::NORMAL);

@@ -1212,10 +1212,13 @@ impl Checker {
         // be assigned until contextual typing is complete, so we need to defer in
         // cases where contextual typing may take place.
         // The worker can set resolved_type, so read the links again here.
-        if self.value_symbol_links.get(symbol).resolved_type.is_nil()
-            && !self.is_parameter_of_context_sensitive_signature(symbol)
-        {
-            self.value_symbol_links.get(symbol).resolved_type = t;
+        if self.value_symbol_links.get(symbol).resolved_type.is_nil() {
+            if self.is_parameter_of_context_sensitive_signature(symbol) {
+                // infmemo1 R7 (C3): a later read can get another type.
+                self.infer_memo.param_taints += 1;
+            } else {
+                self.value_symbol_links.get(symbol).resolved_type = t;
+            }
         }
         t
     }

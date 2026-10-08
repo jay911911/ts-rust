@@ -1654,7 +1654,10 @@ impl Checker {
             }
         }
         self.cached_types.insert(key, t);
+        // infmemo1 R5 (C2): the cache holds `t` until the worker is done.
+        self.infer_memo.simplify_depth += 1;
         let mut result = self.get_simplified_indexed_access_type_worker(t, writing);
+        self.infer_memo.simplify_depth -= 1;
         if result != t {
             // If the simplification is a union type that includes t, remove t from the type.
             result = self.remove_type(result, t);

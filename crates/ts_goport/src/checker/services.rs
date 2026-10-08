@@ -547,6 +547,20 @@ impl Checker {
         node: Node,
         f: impl FnOnce(&mut Checker) -> T,
     ) -> T {
+        // infmemo1 R0: no inference memo lookups or stores in the scope.
+        self.infer_memo.rollback_depth += 1;
+        let result = self.run_without_resolved_signature_caching_worker(node, f);
+        self.infer_memo.rollback_depth -= 1;
+        result
+    }
+
+    // PORT: the body of Go runWithoutResolvedSignatureCaching; the function
+    // above only counts the open scopes for the inference memo.
+    fn run_without_resolved_signature_caching_worker<T>(
+        &mut self,
+        node: Node,
+        f: impl FnOnce(&mut Checker) -> T,
+    ) -> T {
         let mut ancestor_node = find_ancestor(node, is_call_like_or_function_like_expression);
         if ancestor_node.is_some() {
             let mut cached_resolved_signatures: FxHashMap<Node, SignatureId> = FxHashMap::default();

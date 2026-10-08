@@ -322,13 +322,22 @@ impl Checker {
             s.priority = priority;
             s.inference_priority = InferencePriority::MAX_VALUE;
             s.contravariant = contravariant;
-            self.infer_from_types(s, original_source, original_target);
+            if self.infer_memo.mode == crate::checker::infer_memo::InferMemoMode::Off {
+                self.infer_from_types(s, original_source, original_target);
+            } else {
+                self.infer_from_types_memo(s, original_source, original_target);
+            }
         }
         self.put_inference_state(n);
     }
 
     // Go: checker/inference.go:65 inferFromTypes
     pub fn infer_from_types(&mut self, n: &mut InferenceState, source: TypeId, target: TypeId) {
+        // infmemo1: the steps of a walk, and in verify mode its trace.
+        self.infer_memo.steps = self.infer_memo.steps.wrapping_add(1);
+        if self.infer_memo.tracing {
+            self.infer_memo.trace_step(n, source, target);
+        }
         let mut source = source;
         let mut target = target;
         if !self.could_contain_type_variables(target) || self.is_no_infer_type(target) {
@@ -566,6 +575,7 @@ impl Checker {
                                     .candidate_lists_mut()
                                     .contra_candidates
                                     .push(candidate);
+                                self.infer_memo.clears += 1;
                                 self.clear_cached_inferences(ctx);
                             }
                         } else if !self.inference_context(ctx).inferences[inference]
@@ -576,6 +586,7 @@ impl Checker {
                                 .candidate_lists_mut()
                                 .candidates
                                 .push(candidate);
+                            self.infer_memo.clears += 1;
                             self.clear_cached_inferences(ctx);
                         }
                     }
@@ -586,6 +597,7 @@ impl Checker {
                         let original_target = n.original_target;
                         if !self.is_type_parameter_at_top_level(original_target, target, 0) {
                             self.inference_context_mut(ctx).inferences[inference].top_level = false;
+                            self.infer_memo.clears += 1;
                             self.clear_cached_inferences(ctx);
                         }
                     }

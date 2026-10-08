@@ -139,6 +139,7 @@ impl EmitInput<'_> {
 pub fn emit_and_report_statistics(input: &EmitInput) -> (CompileAndEmitResult, Option<Statistics>) {
     let mut statistics = None;
     let mut result = emit_files_and_report_errors(input);
+    crate::checker::infer_memo::write_infer_memo_stats();
     if result.status != ExitStatus::Success {
         // compile exited early
         return (result, None);

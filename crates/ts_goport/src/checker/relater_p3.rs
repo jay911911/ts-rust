@@ -332,7 +332,10 @@ impl Checker {
                     {
                         let no_type_predicate = self.no_type_predicate;
                         self.sig_mut(sig).resolved_type_predicate = no_type_predicate; // avoid infinite loop
+                        // infmemo1 R5 (C1): the predicate reads as none until the body is done.
+                        self.infer_memo.predicate_depth += 1;
                         let p = self.get_type_predicate_from_body(declaration);
+                        self.infer_memo.predicate_depth -= 1;
                         self.sig_mut(sig).resolved_type_predicate = p;
                     }
                 }

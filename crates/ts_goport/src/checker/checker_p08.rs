@@ -1322,6 +1322,8 @@ impl Checker {
         // If a type has been cached for the node, return it.
         if let Some(&cached_type) = self.flow_type_cache.get(&node) {
             if cached_type.is_some() {
+                // infmemo1 R7: a flowTypeCache hit.
+                self.infer_memo.taints += 1;
                 return cached_type;
             }
         }

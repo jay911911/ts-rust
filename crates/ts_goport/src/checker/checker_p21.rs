@@ -228,6 +228,9 @@ impl Checker {
                 return -1;
             }
             if resolution.target == target && resolution.property_name == property_name {
+                // infmemo1 R7: a cycle start older than a walk.
+                self.infer_memo.taint_min_resolution =
+                    self.infer_memo.taint_min_resolution.min(i as u32);
                 return i;
             }
             i -= 1;
@@ -800,9 +803,14 @@ impl Checker {
             } else if object_flags.intersects(ObjectFlags::REVERSE_MAPPED) {
                 self.resolve_reverse_mapped_type_members(t);
             } else if object_flags.intersects(ObjectFlags::ANONYMOUS) {
+                // infmemo1 R5: these two set members early (checker.go:20987, :21231).
+                self.infer_memo.early_members_depth += 1;
                 self.resolve_anonymous_type_members(t);
+                self.infer_memo.early_members_depth -= 1;
             } else if object_flags.intersects(ObjectFlags::MAPPED) {
+                self.infer_memo.early_members_depth += 1;
                 self.resolve_mapped_type_members(t);
+                self.infer_memo.early_members_depth -= 1;
             } else {
                 panic!("Unhandled case in resolveStructuredTypeMembers");
             }

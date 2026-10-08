@@ -29,6 +29,8 @@ impl Checker {
         let save_current_node = self.current_node;
         self.current_node = node;
         self.instantiation_count = 0;
+        // infmemo1 R3: a count reset.
+        self.infer_memo.resets += 1;
         let uninstantiated_type = self.check_expression_worker(node, check_mode);
         let t = self.instantiate_type_with_single_generic_call_signature(
             node,
@@ -1488,6 +1490,10 @@ impl Checker {
         if cached.is_some() && cached != self.resolving_signature && candidates_out_array.is_none()
         {
             return cached;
+        }
+        if cached.is_some() && cached == self.resolving_signature {
+            // infmemo1 R7: a resolvingSignature read.
+            self.infer_memo.taints += 1;
         }
         let save_resolution_start = self.resolution_start;
         if cached.is_nil() {

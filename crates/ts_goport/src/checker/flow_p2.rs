@@ -650,9 +650,11 @@ impl Checker {
         let in_process = self
             .flow_loop_stack
             .iter()
-            .find(|loop_info| loop_info.key == key && !loop_info.types.is_empty())
-            .map(|loop_info| loop_info.types.clone());
-        if let Some(loop_types) = in_process {
+            .position(|loop_info| loop_info.key == key && !loop_info.types.is_empty())
+            .map(|i| (i, self.flow_loop_stack[i].types.clone()));
+        if let Some((loop_index, loop_types)) = in_process {
+            // infmemo1 R7: an in-process loop label.
+            self.infer_memo.taint_min_loop = self.infer_memo.taint_min_loop.min(loop_index as u32);
             let union =
                 self.get_union_or_evolving_array_type(f, &loop_types, UnionReduction::LITERAL);
             return self.new_flow_type(union, true /*incomplete*/);

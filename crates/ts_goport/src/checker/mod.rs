@@ -48,6 +48,7 @@ pub mod fnfields;
 pub mod grammarchecks_p1;
 pub mod grammarchecks_p2;
 pub mod grammarchecks_p3;
+pub mod infer_memo;
 pub mod inference_p1;
 pub mod inference_p2;
 pub mod jsdoc;

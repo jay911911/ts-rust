@@ -315,6 +315,8 @@ impl Checker {
             let save_within_unreachable_code = self.within_unreachable_code;
             self.current_node = node;
             self.instantiation_count = 0;
+            // infmemo1 R3: a count reset.
+            self.infer_memo.resets += 1;
             self.check_source_element_worker(node);
             self.current_node = save_current_node;
             self.within_unreachable_code = save_within_unreachable_code;
@@ -674,6 +676,8 @@ impl Checker {
         let save_current_node = self.current_node;
         self.current_node = node;
         self.instantiation_count = 0;
+        // infmemo1 R3: a count reset.
+        self.infer_memo.resets += 1;
         match node.kind() {
             SyntaxKind::CallExpression
             | SyntaxKind::NewExpression

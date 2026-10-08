@@ -264,6 +264,8 @@ impl Checker {
                 );
             }
             self.flow_analysis_disabled = true;
+            // infmemo1 R7: the flow depth limit.
+            self.infer_memo.taints += 1;
             let reference = f.borrow().reference;
             self.report_flow_control_error(reference);
             return FlowType {
@@ -339,6 +341,8 @@ impl Checker {
                     continue;
                 }
             } else if flags.intersects(FlowFlags::REDUCE_LABEL) {
+                // infmemo1 R7: a reduce label.
+                self.infer_memo.taints += 1;
                 f.borrow_mut()
                     .reduce_labels
                     .push(ReduceLabel::of(flow_data));
@@ -757,7 +761,12 @@ impl Checker {
                     // When narrowing a reference to a const variable, non-assigned parameter, or readonly property, we inline
                     // up to five levels of aliased conditional expressions that are themselves declared as const variables.
                     let reference = f.borrow().reference;
-                    if !self.is_matching_reference(reference, expr) && self.inline_level < 5 {
+                    let matching = self.is_matching_reference(reference, expr);
+                    if !matching && self.inline_level >= 5 {
+                        // infmemo1 R7: the inline limit.
+                        self.infer_memo.taints += 1;
+                    }
+                    if !matching && self.inline_level < 5 {
                         let symbol = self.get_resolved_symbol(expr);
                         if self.is_constant_variable(symbol) {
                             let declaration = self.sym(symbol).value_declaration;
