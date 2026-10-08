@@ -206,6 +206,46 @@ impl Checker {
         construct_signatures: &[SignatureId],
         index_infos: &[IndexInfoId],
     ) {
+        self.infer_memo_members_overwrite(t, u64::MAX);
+        self.set_own_structured_type_members(
+            t,
+            members,
+            call_signatures,
+            construct_signatures,
+            index_infos,
+        );
+    }
+
+    /// infmemo1 (P2, go-model.md 14.3, 15.1): Go replaces resolved
+    /// members, so a stored walk can have read the old ones. Those members
+    /// were stored inside this resolver call, so when no walk was stored
+    /// since the call began (`stores_at_entry`, `u64::MAX` when not known),
+    /// no entry can have read them.
+    #[inline]
+    pub(crate) fn infer_memo_members_overwrite(&mut self, t: TypeId, stores_at_entry: u64) {
+        if self
+            .ty(t)
+            .object_flags
+            .intersects(ObjectFlags::MEMBERS_RESOLVED)
+            && self.infer_memo.store_count() != stores_at_entry
+        {
+            self.infer_memo
+                .purge(crate::checker::infer_memo::Purge::Members);
+        }
+    }
+
+    /// `set_structured_type_members` without the P2 check, for the later
+    /// stores of `resolve_anonymous_type_members` and
+    /// `resolve_mapped_type_members` after their own early store (Go
+    /// :20995, :21005, :21028, :21318).
+    pub fn set_own_structured_type_members(
+        &mut self,
+        t: TypeId,
+        members: SymbolTable,
+        call_signatures: &[SignatureId],
+        construct_signatures: &[SignatureId],
+        index_infos: &[IndexInfoId],
+    ) {
         let signatures = if construct_signatures.is_empty() {
             call_signatures.into()
         } else if call_signatures.is_empty() {
@@ -559,7 +599,12 @@ impl Checker {
                 let regular = self.map_type(t, &mut |c: &mut Checker, t: TypeId| {
                     c.get_regular_type_of_literal_type(t)
                 });
-                self.ty_mut(t).as_union_type_mut().regular_type = regular;
+                let prev_slot = std::mem::replace(
+                    &mut self.ty_mut(t).as_union_type_mut().regular_type,
+                    regular,
+                );
+                self.infer_memo
+                    .lazy_store(prev_slot.is_some() && prev_slot != regular);
             }
             return self.ty(t).as_union_type().regular_type;
         }
@@ -917,7 +962,9 @@ impl Checker {
         let result = self.map_type(t, &mut |c: &mut Checker, t: TypeId| {
             c.get_base_type_of_literal_type(t)
         });
-        self.cached_types.insert(key, result);
+        let prev_slot = self.cached_types.insert(key, result);
+        self.infer_memo
+            .lazy_store(prev_slot.is_some_and(|prev| prev != result));
         result
     }
 
@@ -1780,7 +1827,9 @@ impl Checker {
                 }
             }
         }
-        self.subtype_reduction_cache.insert(key, types.to_vec());
+        let prev_slot = self.subtype_reduction_cache.insert(key, types.to_vec());
+        self.infer_memo
+            .lazy_store(prev_slot.is_some_and(|prev| prev[..] != types[..]));
         true
     }
 }

@@ -153,7 +153,12 @@ impl Checker {
                 panic!("Unexpected nil in getImmediateAliasedSymbol");
             }
             let target = self.get_target_of_alias_declaration(node);
-            self.alias_symbol_links.get(symbol).immediate_target = target;
+            let prev_slot = std::mem::replace(
+                &mut self.alias_symbol_links.get(symbol).immediate_target,
+                target,
+            );
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != target);
         }
         self.alias_symbol_links.get(symbol).immediate_target
     }

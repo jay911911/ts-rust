@@ -497,7 +497,12 @@ impl Checker {
     pub fn get_symbol_for_private_identifier_expression(&mut self, node: Node) -> SymbolId {
         if self.symbol_node_links.get(node).resolved_symbol.is_nil() {
             let resolved = self.lookup_symbol_for_private_identifier_declaration(node.text(), node);
-            self.symbol_node_links.get(node).resolved_symbol = resolved;
+            let prev_slot = std::mem::replace(
+                &mut self.symbol_node_links.get(node).resolved_symbol,
+                resolved,
+            );
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != resolved);
         }
         self.symbol_node_links.get(node).resolved_symbol
     }

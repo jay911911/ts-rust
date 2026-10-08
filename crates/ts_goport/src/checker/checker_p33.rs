@@ -1455,8 +1455,11 @@ impl Checker {
             discriminated =
                 self.discriminate_type_by_discriminable_items(contextual_type, &mut discriminator);
         }
-        self.discriminated_contextual_types
+        let prev_slot = self
+            .discriminated_contextual_types
             .insert(key, discriminated);
+        self.infer_memo
+            .lazy_store(prev_slot.is_some_and(|prev| prev != discriminated));
         discriminated
     }
 

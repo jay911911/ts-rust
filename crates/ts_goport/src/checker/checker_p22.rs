@@ -190,6 +190,9 @@ impl Checker {
                 d.declared_members_resolved = true;
                 d.declared_members = members;
             }
+            // infmemo1 (R5): an early-flag window (Go :19953). A call inside
+            // reads the flag and gets no signatures or index infos yet.
+            self.infer_memo.early_flags_depth += 1;
             let call_symbol = self.symbols.get(members, INTERNAL_SYMBOL_NAME_CALL);
             let call_signatures = self.get_signatures_of_symbol(call_symbol);
             self.ty_mut(t)
@@ -202,6 +205,7 @@ impl Checker {
                 .declared_construct_signatures = construct_signatures.into();
             let index_infos = self.get_index_infos_of_symbol(symbol);
             self.ty_mut(t).as_interface_type_mut().declared_index_infos = index_infos.into();
+            self.infer_memo.early_flags_depth -= 1;
         }
         self.ty(t).as_interface_type()
     }
@@ -672,7 +676,17 @@ impl Checker {
             min_argument_count,
         );
         self.sig_mut(sig).type_parameters_origin = type_parameters_origin;
-        self.signature_links.get(declaration).resolved_signature = sig;
+        let prev_slot = std::mem::replace(
+            &mut self.signature_links.get(declaration).resolved_signature,
+            sig,
+        );
+        self.infer_memo
+            .lazy_store(prev_slot.is_some() && prev_slot != sig);
+        if is_function_expression_or_arrow_function(declaration)
+            || is_object_literal_method(declaration)
+        {
+            self.infer_memo.note_contextual_signature(sig);
+        }
         sig
     }
 

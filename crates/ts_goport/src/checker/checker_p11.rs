@@ -1430,7 +1430,9 @@ impl Checker {
                         );
                         self.ty_mut(return_only_type).object_flags |=
                             ObjectFlags::NON_INFERRABLE_TYPE;
-                        self.context_free_types.insert(node, return_only_type);
+                        let prev_slot = self.context_free_types.insert(node, return_only_type);
+                        self.infer_memo
+                            .lazy_store(prev_slot.is_some_and(|prev| prev != return_only_type));
                         return return_only_type;
                     }
                 }

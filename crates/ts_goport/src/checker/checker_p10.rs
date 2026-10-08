@@ -863,6 +863,10 @@ impl Checker {
         // be cached, but the error reporting code below executes before getResolvedSignature sets
         // resolvedSignature.
         self.signature_links.get(node).resolved_signature = result;
+        // infmemo1 (R5): with a flow loop open, `getResolvedSignature` puts
+        // back nil over this store (Go :8621), so no walk from here to the
+        // return is stored.
+        self.infer_memo.overload_failure_depth += 1;
         // No signatures were applicable. Now report errors based on the last applicable signature with
         // no arguments excluded from assignability checks.
         // If candidate is undefined, it means that no candidates had a suitable arity. In that case,
@@ -878,6 +882,7 @@ impl Checker {
             }
             self.report_call_resolution_errors(node, &mut s, signatures, head_message);
         }
+        self.infer_memo.overload_failure_depth -= 1;
         result
     }
 

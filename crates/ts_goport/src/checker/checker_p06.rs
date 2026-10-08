@@ -942,7 +942,9 @@ impl Checker {
             result =
                 self.get_type_of_module_declaration_import_attributes(module_decl.attributes());
         }
-        self.module_import_attributes_types.insert(symbol, result);
+        let prev_slot = self.module_import_attributes_types.insert(symbol, result);
+        self.infer_memo
+            .lazy_store(prev_slot.is_some_and(|prev| prev != result));
         result
     }
 }
@@ -1319,7 +1321,9 @@ impl Checker {
             let t = self.new_anonymous_type(symbol, members, &[], &[], &[]);
             self.ty_mut(t).object_flags |=
                 ObjectFlags::OBJECT_LITERAL | ObjectFlags::NON_INFERRABLE_TYPE;
-            self.type_node_links.get(node).resolved_type = t;
+            let prev_slot = std::mem::replace(&mut self.type_node_links.get(node).resolved_type, t);
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != t);
         }
         self.type_node_links.get(node).resolved_type
     }

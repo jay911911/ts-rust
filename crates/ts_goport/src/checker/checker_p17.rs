@@ -1492,7 +1492,9 @@ impl Checker {
             } else {
                 synthetic_type = t;
             }
-            self.cached_types.insert(key, synthetic_type);
+            let prev_slot = self.cached_types.insert(key, synthetic_type);
+            self.infer_memo
+                .lazy_store(prev_slot.is_some_and(|prev| prev != synthetic_type));
             return synthetic_type;
         }
         t

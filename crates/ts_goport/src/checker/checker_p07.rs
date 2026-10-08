@@ -966,7 +966,9 @@ impl Checker {
         }
         let result = self.get_iteration_types_of_iterable_worker(t, use_, error_node, no_cache);
         if !no_cache {
-            self.iteration_types_cache.insert(key, result.clone());
+            let prev_slot = self.iteration_types_cache.insert(key, result.clone());
+            self.infer_memo
+                .lazy_store(prev_slot.is_some_and(|prev| prev != result));
         }
         result
     }

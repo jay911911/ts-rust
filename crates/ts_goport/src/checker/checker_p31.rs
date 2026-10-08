@@ -301,7 +301,12 @@ impl Checker {
                     modifiers_type = self.unknown_type;
                 }
             }
-            self.ty_mut(t).as_mapped_type_mut().modifiers_type = modifiers_type;
+            let prev_slot = std::mem::replace(
+                &mut self.ty_mut(t).as_mapped_type_mut().modifiers_type,
+                modifiers_type,
+            );
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != modifiers_type);
         }
         self.ty(t).as_mapped_type().modifiers_type
     }
@@ -359,7 +364,9 @@ impl Checker {
         self.ty_mut(regular).flags = resolved_flags;
         self.ty_mut(regular).object_flags |=
             resolved_object_flags.without(ObjectFlags::FRESH_LITERAL);
-        self.cached_types.insert(key, regular);
+        let prev_slot = self.cached_types.insert(key, regular);
+        self.infer_memo
+            .lazy_store(prev_slot.is_some_and(|prev| prev != regular));
         regular
     }
 
@@ -1468,7 +1475,9 @@ impl Checker {
         let global_promise_type = self.get_global_promise_type();
         if self.is_reference_to_type(t, global_promise_type) {
             let result = self.type_arguments_of(t)[0];
-            self.cached_types.insert(key, result);
+            let prev_slot = self.cached_types.insert(key, result);
+            self.infer_memo
+                .lazy_store(prev_slot.is_some_and(|prev| prev != result));
             return result;
         }
         // primitives with a `{ then() }` won't be unwrapped/adopted.
@@ -1549,7 +1558,9 @@ impl Checker {
         }
         let result =
             self.get_union_type_ex(&value_types, UnionReduction::SUBTYPE, None, TypeId::NIL);
-        self.cached_types.insert(key, result);
+        let prev_slot = self.cached_types.insert(key, result);
+        self.infer_memo
+            .lazy_store(prev_slot.is_some_and(|prev| prev != result));
         result
     }
 }

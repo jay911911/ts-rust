@@ -720,12 +720,16 @@ impl Checker {
             let mapper = self.new_type_mapper(&type_parameters, &filled);
             instantiation = self.instantiate_type_with_alias(t, mapper, alias);
             // PORT: Go writes into the links map; a nil map (non-generic alias) panics like Go.
-            self.type_alias_links
+            let prev_slot = self
+                .type_alias_links
                 .get(symbol)
                 .instantiations
                 .as_mut()
                 .expect("assignment to entry in nil map")
                 .insert(key, instantiation);
+            // infmemo1 (P4, Go :24116).
+            self.infer_memo
+                .lazy_store(prev_slot.is_some_and(|prev| prev != instantiation));
         }
         instantiation
     }
@@ -1125,7 +1129,12 @@ impl Checker {
                                 self.create_computed_enum_type(member_symbol)
                             };
                             let fresh = self.get_fresh_type_of_literal_type(member_type);
-                            self.declared_type_links.get(member_symbol).declared_type = fresh;
+                            let prev_slot = std::mem::replace(
+                                &mut self.declared_type_links.get(member_symbol).declared_type,
+                                fresh,
+                            );
+                            self.infer_memo
+                                .lazy_store(prev_slot.is_some() && prev_slot != fresh);
                             member_type_list.push(member_type);
                         }
                     }
@@ -1149,7 +1158,12 @@ impl Checker {
                 ty.flags |= TypeFlags::ENUM_LITERAL;
                 ty.symbol = symbol;
             }
-            self.declared_type_links.get(symbol).declared_type = enum_type;
+            let prev_slot = std::mem::replace(
+                &mut self.declared_type_links.get(symbol).declared_type,
+                enum_type,
+            );
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != enum_type);
         }
         self.declared_type_links.get(symbol).declared_type
     }
@@ -1492,7 +1506,10 @@ impl Checker {
         if self.declared_type_links.get(symbol).declared_type.is_nil() {
             let resolved = self.resolve_alias(symbol);
             let t = self.get_declared_type_of_symbol(resolved);
-            self.declared_type_links.get(symbol).declared_type = t;
+            let prev_slot =
+                std::mem::replace(&mut self.declared_type_links.get(symbol).declared_type, t);
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != t);
         }
         self.declared_type_links.get(symbol).declared_type
     }
@@ -1507,7 +1524,10 @@ impl Checker {
             let t = self.check_expression_with_type_arguments(node);
             let widened = self.get_widened_type(t);
             let resolved = self.get_regular_type_of_literal_type(widened);
-            self.type_node_links.get(node).resolved_type = resolved;
+            let prev_slot =
+                std::mem::replace(&mut self.type_node_links.get(node).resolved_type, resolved);
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != resolved);
         }
         self.type_node_links.get(node).resolved_type
     }
@@ -1564,7 +1584,12 @@ impl Checker {
                     );
                 }
             }
-            self.type_node_links.get(node).resolved_type = resolved_type;
+            let prev_slot = std::mem::replace(
+                &mut self.type_node_links.get(node).resolved_type,
+                resolved_type,
+            );
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != resolved_type);
         }
         self.type_node_links.get(node).resolved_type
     }

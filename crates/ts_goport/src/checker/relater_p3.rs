@@ -301,14 +301,20 @@ impl Checker {
                 if target_type_predicate.is_some() {
                     let mapper = self.sig(sig).mapper;
                     let p = self.instantiate_type_predicate(target_type_predicate, mapper);
-                    self.sig_mut(sig).resolved_type_predicate = p;
+                    let prev_slot =
+                        std::mem::replace(&mut self.sig_mut(sig).resolved_type_predicate, p);
+                    self.infer_memo
+                        .lazy_store(prev_slot.is_some() && prev_slot != p);
                 }
             } else if let Some(composite) = composite {
                 let p = self.get_union_or_intersection_type_predicate(
                     &composite.signatures,
                     composite.is_union,
                 );
-                self.sig_mut(sig).resolved_type_predicate = p;
+                let prev_slot =
+                    std::mem::replace(&mut self.sig_mut(sig).resolved_type_predicate, p);
+                self.infer_memo
+                    .lazy_store(prev_slot.is_some() && prev_slot != p);
             } else {
                 let declaration = self.sig(sig).declaration;
                 if declaration.is_some() {
@@ -317,7 +323,12 @@ impl Checker {
                         if is_type_predicate_node(type_node) {
                             let p =
                                 self.create_type_predicate_from_type_predicate_node(type_node, sig);
-                            self.sig_mut(sig).resolved_type_predicate = p;
+                            let prev_slot = std::mem::replace(
+                                &mut self.sig_mut(sig).resolved_type_predicate,
+                                p,
+                            );
+                            self.infer_memo
+                                .lazy_store(prev_slot.is_some() && prev_slot != p);
                         }
                     } else if is_function_like_declaration(declaration)
                         && {
