@@ -1625,7 +1625,9 @@ impl Checker {
             return *narrowed_type;
         }
         let narrowed_type = self.get_narrowed_type_worker(t, candidate, assume_true, check_derived);
-        self.narrowed_types.insert(key, narrowed_type);
+        let prev_slot = self.narrowed_types.insert(key, narrowed_type);
+        self.infer_memo
+            .lazy_store(prev_slot.is_some_and(|prev| prev != narrowed_type));
         narrowed_type
     }
 

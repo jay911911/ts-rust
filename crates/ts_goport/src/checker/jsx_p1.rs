@@ -483,8 +483,11 @@ impl Checker {
         };
         let discriminated =
             self.discriminate_type_by_discriminable_items(contextual_type, &mut discriminator);
-        self.discriminated_contextual_types
+        let prev_slot = self
+            .discriminated_contextual_types
             .insert(key, discriminated);
+        self.infer_memo
+            .lazy_store(prev_slot.is_some_and(|prev| prev != discriminated));
         discriminated
     }
 
@@ -1000,7 +1003,12 @@ impl Checker {
             && jsx_fragment_factory_name != "null";
         if !should_resolve_factory_reference {
             let any_type = self.any_type;
-            self.source_file_links.get(file).jsx_fragment_type = any_type;
+            let prev_slot = std::mem::replace(
+                &mut self.source_file_links.get(file).jsx_fragment_type,
+                any_type,
+            );
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != any_type);
             return any_type;
         }
         let mut jsx_factory_symbol = self.get_jsx_namespace_container_for_implicit_import(node);
@@ -1022,12 +1030,20 @@ impl Checker {
         }
         if jsx_factory_symbol.is_nil() {
             let error_type = self.error_type;
-            self.source_file_links.get(file).jsx_fragment_type = error_type;
+            let prev_slot = std::mem::replace(
+                &mut self.source_file_links.get(file).jsx_fragment_type,
+                error_type,
+            );
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != error_type);
             return error_type;
         }
         if self.sym(jsx_factory_symbol).name == ReactNames.fragment {
             let t = self.get_type_of_symbol(jsx_factory_symbol);
-            self.source_file_links.get(file).jsx_fragment_type = t;
+            let prev_slot =
+                std::mem::replace(&mut self.source_file_links.get(file).jsx_fragment_type, t);
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != t);
             return t;
         }
         let mut resolved_alias = jsx_factory_symbol;
@@ -1050,7 +1066,10 @@ impl Checker {
         } else {
             self.error_type
         };
-        self.source_file_links.get(file).jsx_fragment_type = t;
+        let prev_slot =
+            std::mem::replace(&mut self.source_file_links.get(file).jsx_fragment_type, t);
+        self.infer_memo
+            .lazy_store(prev_slot.is_some() && prev_slot != t);
         t
     }
 

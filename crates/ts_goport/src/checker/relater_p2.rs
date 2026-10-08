@@ -369,17 +369,20 @@ impl Checker {
                     .intersects(CheckFlags::IS_DISCRIMINANT_COMPUTED)
                 {
                     self.sym_mut(prop).check_flags |= CheckFlags::IS_DISCRIMINANT_COMPUTED;
-                    if self
+                    // infmemo1 (R5): an early-flag window (relater.go:1084-1088).
+                    self.infer_memo.early_flags_depth += 1;
+                    let discriminant = self
                         .sym(prop)
                         .check_flags
                         .contains(CheckFlags::NON_UNIFORM_AND_LITERAL)
                         && {
                             let prop_type = self.get_type_of_symbol(prop);
                             !self.is_generic_type(prop_type)
-                        }
-                    {
+                        };
+                    if discriminant {
                         self.sym_mut(prop).check_flags |= CheckFlags::IS_DISCRIMINANT;
                     }
+                    self.infer_memo.early_flags_depth -= 1;
                 }
                 return self
                     .sym(prop)

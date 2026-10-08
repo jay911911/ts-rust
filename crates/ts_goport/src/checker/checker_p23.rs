@@ -403,7 +403,7 @@ impl Checker {
                 self.instantiate_signatures_of_type(d_target, SignatureKind::CONSTRUCT, d_mapper);
             let target_index_infos = self.get_index_infos_of_type(d_target);
             let index_infos = self.instantiate_index_infos(&target_index_infos, d_mapper);
-            self.set_structured_type_members(
+            self.set_own_structured_type_members(
                 t,
                 members,
                 &call_signatures,
@@ -422,7 +422,7 @@ impl Checker {
             let new_symbol = self.symbols.get(members, INTERNAL_SYMBOL_NAME_NEW);
             let construct_signatures = self.get_signatures_of_symbol(new_symbol);
             let index_infos = self.get_index_infos_of_symbol(symbol);
-            self.set_structured_type_members(
+            self.set_own_structured_type_members(
                 t,
                 members,
                 &call_signatures,
@@ -465,7 +465,7 @@ impl Checker {
                 members = self.symbols.clone_table(members);
                 let base_properties = self.get_properties_of_type(base_constructor_type);
                 self.add_inherited_members(members, &base_properties);
-                self.set_structured_type_members(t, members, &[], &[], &[]);
+                self.set_own_structured_type_members(t, members, &[], &[], &[]);
             } else if base_constructor_type == self.any_type {
                 base_constructor_index_info = self.any_base_type_index_info;
             }
@@ -1038,7 +1038,7 @@ impl Checker {
                 self.for_each_type(lower_bound, &mut add_member_for_key_type);
             }
         }
-        self.set_structured_type_members(t, members, &[], &[], &index_infos);
+        self.set_own_structured_type_members(t, members, &[], &[], &index_infos);
     }
 
     // Go: checker/checker.go:21321 getTypeOfMappedSymbol

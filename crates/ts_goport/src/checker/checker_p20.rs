@@ -796,7 +796,9 @@ impl Checker {
                 };
             }
         }
-        self.this_expando_kinds.insert(symbol, kind);
+        let prev_slot = self.this_expando_kinds.insert(symbol, kind);
+        self.infer_memo
+            .lazy_store(prev_slot.is_some_and(|prev| prev != kind));
         self.this_expando_locations.insert(symbol, location);
         (kind, location)
     }
@@ -1115,7 +1117,9 @@ impl Checker {
                 result = self.create_type_reference(target, &widened_arguments);
             }
             if result.is_some() && context.is_none() {
-                self.cached_types.insert(key, result);
+                let prev_slot = self.cached_types.insert(key, result);
+                self.infer_memo
+                    .lazy_store(prev_slot.is_some_and(|prev| prev != result));
             }
             return if result.is_some() { result } else { t };
         }
@@ -1318,7 +1322,10 @@ impl Checker {
     pub fn get_type_of_enum_member(&mut self, symbol: SymbolId) -> TypeId {
         if self.value_symbol_links.get(symbol).resolved_type.is_nil() {
             let t = self.get_declared_type_of_enum_member(symbol);
-            self.value_symbol_links.get(symbol).resolved_type = t;
+            let prev_slot =
+                std::mem::replace(&mut self.value_symbol_links.get(symbol).resolved_type, t);
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != t);
         }
         self.value_symbol_links.get(symbol).resolved_type
     }

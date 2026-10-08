@@ -266,6 +266,9 @@ impl Checker {
                 types[i] = self.get_type_of_switch_clause(*clause);
             }
             let links = self.switch_statement_links.get(node);
+            // infmemo1 (P4, Go flow.go:2035).
+            self.infer_memo
+                .lazy_store(links.switch_types_computed && links.switch_types != types);
             links.switch_types = types;
             links.switch_types_computed = true;
         }
@@ -329,7 +332,12 @@ impl Checker {
             if !(signature.is_some() && self.has_type_predicate_or_never_return_type(signature)) {
                 signature = self.unknown_signature;
             }
-            self.signature_links.get(node).effects_signature = signature;
+            let prev_slot = std::mem::replace(
+                &mut self.signature_links.get(node).effects_signature,
+                signature,
+            );
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != signature);
         }
         if signature == self.unknown_signature {
             return SignatureId::NIL;
@@ -1040,7 +1048,9 @@ impl Checker {
                     }
                     let reachable =
                         self.is_reachable_flow_node_worker(f, flow, true /*noCacheCheck*/);
-                    self.flow_node_reachable.insert(flow, reachable);
+                    let prev_slot = self.flow_node_reachable.insert(flow, reachable);
+                    self.infer_memo
+                        .lazy_store(prev_slot.is_some_and(|prev| prev != reachable));
                     return reachable;
                 }
                 no_cache_check = false;
@@ -1170,7 +1180,9 @@ impl Checker {
                     // through and walks the node again; kept as is.
                     let post_super =
                         self.is_post_super_flow_node_worker(f, flow, true /*noCacheCheck*/);
-                    self.flow_node_post_super.insert(flow, post_super);
+                    let prev_slot = self.flow_node_post_super.insert(flow, post_super);
+                    self.infer_memo
+                        .lazy_store(prev_slot.is_some_and(|prev| prev != post_super));
                 }
                 no_cache_check = false;
             }

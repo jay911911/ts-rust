@@ -777,12 +777,16 @@ impl Checker {
                 c.get_awaited_type_no_alias_ex(t, error_node, diagnostic_message, args.clone())
             });
             self.awaited_type_stack.pop();
-            self.cached_types.insert(key, mapped);
+            let prev_slot = self.cached_types.insert(key, mapped);
+            self.infer_memo
+                .lazy_store(prev_slot.is_some_and(|prev| prev != mapped));
             return mapped;
         }
         // If `type` is generic and should be wrapped in `Awaited<T>`, return it.
         if self.is_awaited_type_needed(t) {
-            self.cached_types.insert(key, t);
+            let prev_slot = self.cached_types.insert(key, t);
+            self.infer_memo
+                .lazy_store(prev_slot.is_some_and(|prev| prev != t));
             return t;
         }
         let mut this_type_for_error = TypeId::NIL;
@@ -848,7 +852,9 @@ impl Checker {
             if awaited_type.is_nil() {
                 return TypeId::NIL;
             }
-            self.cached_types.insert(key, awaited_type);
+            let prev_slot = self.cached_types.insert(key, awaited_type);
+            self.infer_memo
+                .lazy_store(prev_slot.is_some_and(|prev| prev != awaited_type));
             return awaited_type;
         }
         // The type was not a promise, so it could not be unwrapped any further.
@@ -887,7 +893,9 @@ impl Checker {
             }
             return TypeId::NIL;
         }
-        self.cached_types.insert(key, t);
+        let prev_slot = self.cached_types.insert(key, t);
+        self.infer_memo
+            .lazy_store(prev_slot.is_some_and(|prev| prev != t));
         t
     }
 

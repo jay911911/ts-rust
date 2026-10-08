@@ -254,7 +254,15 @@ impl Checker {
             } else if self.sym(symbol).flags.intersects(SymbolFlags::MODULE) {
                 early_symbols = self.get_exports_of_module_worker(symbol).0;
             }
+            // infmemo1 (P4, Go :16260): a run inside
+            // `getExportsOfModuleWorker` can have stored a final table.
+            let old = self.members_and_exports_links.get(symbol)[kind];
+            self.infer_memo
+                .lazy_store(old.is_some() && old != early_symbols);
             self.members_and_exports_links.get(symbol)[kind] = early_symbols;
+            // infmemo1 (R5): the late-bound member window, to the final
+            // store below.
+            self.infer_memo.late_bound_depth += 1;
             // fill in any as-yet-unresolved late-bound members.
             let mut late_symbols = SymbolTable::NIL;
             let declarations = self.sym(symbol).declarations.clone();
@@ -293,6 +301,12 @@ impl Checker {
                 }
             }
             let combined = self.combine_symbol_tables(early_symbols, late_symbols);
+            self.infer_memo.late_bound_depth -= 1;
+            // infmemo1 (P4, Go :16293): the slot holds this run's early
+            // table unless a run inside stored its own.
+            let old = self.members_and_exports_links.get(symbol)[kind];
+            self.infer_memo
+                .lazy_store(old != early_symbols && old != combined);
             self.members_and_exports_links.get(symbol)[kind] = combined;
         }
         self.members_and_exports_links.get(symbol)[kind]
@@ -407,7 +421,15 @@ impl Checker {
                 if self.sym(late_symbol).parent.is_nil() {
                     self.sym_mut(late_symbol).parent = parent;
                 }
-                self.symbol_node_links.get(decl).resolved_symbol = late_symbol;
+                let prev_slot = std::mem::replace(
+                    &mut self.symbol_node_links.get(decl).resolved_symbol,
+                    late_symbol,
+                );
+                // infmemo1 (P4, Go :16381): the slot holds this call's
+                // early-bound marker (:16330); a run inside sees the marker
+                // and stores nothing.
+                self.infer_memo
+                    .lazy_store(prev_slot != decl.symbol() && prev_slot != late_symbol);
             }
         }
         self.symbol_node_links.get(decl).resolved_symbol
@@ -541,6 +563,9 @@ impl Checker {
             let (exports, type_only_export_star_map) =
                 self.get_exports_of_module_worker(module_symbol);
             let links = self.module_symbol_links.get(module_symbol);
+            // infmemo1 (P4, Go :16454).
+            self.infer_memo
+                .lazy_store(links.resolved_exports.is_some() && links.resolved_exports != exports);
             links.resolved_exports = exports;
             links.type_only_export_star_map = type_only_export_star_map;
         }
@@ -810,7 +835,12 @@ impl Checker {
             } else {
                 self.unknown_symbol
             };
-            self.alias_symbol_links.get(symbol).alias_target = alias_target;
+            let prev_slot = std::mem::replace(
+                &mut self.alias_symbol_links.get(symbol).alias_target,
+                alias_target,
+            );
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != alias_target);
             if !self.pop_type_resolution() {
                 let symbol_text = self.symbol_to_string(symbol);
                 self.error(
@@ -819,7 +849,12 @@ impl Checker {
                     args![symbol_text],
                 );
                 let unknown_symbol = self.unknown_symbol;
-                self.alias_symbol_links.get(symbol).alias_target = unknown_symbol;
+                let prev_slot = std::mem::replace(
+                    &mut self.alias_symbol_links.get(symbol).alias_target,
+                    unknown_symbol,
+                );
+                self.infer_memo
+                    .lazy_store(prev_slot.is_some() && prev_slot != unknown_symbol);
             }
         }
         self.alias_symbol_links.get(symbol).alias_target
@@ -994,7 +1029,12 @@ impl Checker {
         } else {
             self.get_intersection_type(&constituents)
         };
-        self.value_symbol_links.get(symbol).resolved_type = resolved_type;
+        let prev_slot = std::mem::replace(
+            &mut self.value_symbol_links.get(symbol).resolved_type,
+            resolved_type,
+        );
+        self.infer_memo
+            .lazy_store(prev_slot.is_some() && prev_slot != resolved_type);
         resolved_type
     }
 
@@ -1013,7 +1053,12 @@ impl Checker {
             } else {
                 self.get_type_of_symbol_with_deferred_type(symbol)
             };
-            self.value_symbol_links.get(symbol).write_type = write_type;
+            let prev_slot = std::mem::replace(
+                &mut self.value_symbol_links.get(symbol).write_type,
+                write_type,
+            );
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != write_type);
         }
         self.value_symbol_links.get(symbol).write_type
     }
@@ -1177,7 +1222,12 @@ impl Checker {
         let (target, mapper) = (links.target, links.mapper);
         let t = self.get_type_of_symbol(target);
         let resolved_type = self.instantiate_type(t, mapper);
-        self.value_symbol_links.get(symbol).resolved_type = resolved_type;
+        let prev_slot = std::mem::replace(
+            &mut self.value_symbol_links.get(symbol).resolved_type,
+            resolved_type,
+        );
+        self.infer_memo
+            .lazy_store(prev_slot.is_some() && prev_slot != resolved_type);
         resolved_type
     }
 
@@ -1191,7 +1241,12 @@ impl Checker {
         let (target, mapper) = (links.target, links.mapper);
         let t = self.get_write_type_of_symbol(target);
         let write_type = self.instantiate_type(t, mapper);
-        self.value_symbol_links.get(symbol).write_type = write_type;
+        let prev_slot = std::mem::replace(
+            &mut self.value_symbol_links.get(symbol).write_type,
+            write_type,
+        );
+        self.infer_memo
+            .lazy_store(prev_slot.is_some() && prev_slot != write_type);
         write_type
     }
 
@@ -1212,13 +1267,18 @@ impl Checker {
         // be assigned until contextual typing is complete, so we need to defer in
         // cases where contextual typing may take place.
         // The worker can set resolved_type, so read the links again here.
-        if self.value_symbol_links.get(symbol).resolved_type.is_nil() {
+        let stored = self.value_symbol_links.get(symbol).resolved_type;
+        if stored.is_nil() {
             if self.is_parameter_of_context_sensitive_signature(symbol) {
                 // infmemo1 R7 (C3): a later read can get another type.
                 self.infer_memo.param_taints += 1;
             } else {
                 self.value_symbol_links.get(symbol).resolved_type = t;
             }
+        } else if stored != t {
+            // infmemo1 R7 (Go :16875-16878): an inner call stored another
+            // type first, and later reads get that one.
+            self.infer_memo.return_taints += 1;
         }
         t
     }

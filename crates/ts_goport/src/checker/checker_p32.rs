@@ -871,6 +871,8 @@ impl Checker {
             let cached = self.signature_links.get(iife).resolved_signature;
             let any_signature = self.any_signature;
             self.signature_links.get(iife).resolved_signature = any_signature;
+            // infmemo1 (R0b): no lookup and no store until the put-back.
+            self.infer_memo.iife_depth += 1;
             let t;
             if index_of_parameter < args.len() as i32 {
                 let arg_type = self.check_expression(args.get(index_of_parameter as usize));
@@ -880,6 +882,7 @@ impl Checker {
             } else {
                 t = self.undefined_widening_type;
             }
+            self.infer_memo.iife_depth -= 1;
             self.signature_links.get(iife).resolved_signature = cached;
             return t;
         }

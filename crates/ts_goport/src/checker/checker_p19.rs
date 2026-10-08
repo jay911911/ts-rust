@@ -180,7 +180,10 @@ impl Checker {
             let t = self.get_type_of_func_class_enum_module_worker(symbol);
             // PORT: Go assigns through the links pointer taken before the
             // worker call; re-fetch the record here.
-            self.value_symbol_links.get(symbol).resolved_type = t;
+            let prev_slot =
+                std::mem::replace(&mut self.value_symbol_links.get(symbol).resolved_type, t);
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != t);
         }
         self.value_symbol_links.get(symbol).resolved_type
     }
@@ -536,7 +539,12 @@ impl Checker {
             if constraint.is_nil() {
                 constraint = self.no_constraint_type;
             }
-            self.ty_mut(t).as_type_parameter_mut().constraint = constraint;
+            let prev_slot = std::mem::replace(
+                &mut self.ty_mut(t).as_type_parameter_mut().constraint,
+                constraint,
+            );
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != constraint);
         }
         let constraint = self.ty(t).as_type_parameter().constraint;
         if constraint != self.no_constraint_type {
@@ -801,9 +809,15 @@ impl Checker {
             } else {
                 self.get_union_type(&[true_constraint, false_constraint])
             };
-            self.ty_mut(t)
-                .as_conditional_type_mut()
-                .resolved_default_constraint = resolved;
+            let prev_slot = std::mem::replace(
+                &mut self
+                    .ty_mut(t)
+                    .as_conditional_type_mut()
+                    .resolved_default_constraint,
+                resolved,
+            );
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != resolved);
         }
         self.ty(t).as_conditional_type().resolved_default_constraint
     }
@@ -858,17 +872,29 @@ impl Checker {
                         None,
                     );
                     if !self.ty(instantiated).flags.intersects(TypeFlags::NEVER) {
-                        self.ty_mut(t)
-                            .as_conditional_type_mut()
-                            .resolved_constraint_of_distributive = instantiated;
+                        let prev_slot = std::mem::replace(
+                            &mut self
+                                .ty_mut(t)
+                                .as_conditional_type_mut()
+                                .resolved_constraint_of_distributive,
+                            instantiated,
+                        );
+                        self.infer_memo
+                            .lazy_store(prev_slot.is_some() && prev_slot != instantiated);
                         return instantiated;
                     }
                 }
             }
             let no_constraint_type = self.no_constraint_type;
-            self.ty_mut(t)
-                .as_conditional_type_mut()
-                .resolved_constraint_of_distributive = no_constraint_type;
+            let prev_slot = std::mem::replace(
+                &mut self
+                    .ty_mut(t)
+                    .as_conditional_type_mut()
+                    .resolved_constraint_of_distributive,
+                no_constraint_type,
+            );
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != no_constraint_type);
         }
         let resolved = self
             .ty(t)

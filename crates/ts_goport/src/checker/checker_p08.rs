@@ -1332,7 +1332,9 @@ impl Checker {
         // If control flow analysis was required to determine the type, it is worth caching.
         if self.flow_invocation_count != start_invocation_count {
             // PORT: Go lazily makes the nil map; the Rust map always exists.
-            self.flow_type_cache.insert(node, t);
+            let prev_slot = self.flow_type_cache.insert(node, t);
+            self.infer_memo
+                .lazy_store(prev_slot.is_some_and(|prev| prev != t));
         }
         t
     }
@@ -1606,8 +1608,16 @@ impl Checker {
             // PORT: Go nil-assigns the stack and cache; `mem::take` leaves them empty.
             let save_flow_loop_stack = std::mem::take(&mut self.flow_loop_stack);
             let save_flow_type_cache = std::mem::take(&mut self.flow_type_cache);
+            let memo_stores = self.infer_memo.store_count();
             let t = self.check_expression_ex(node, check_mode);
-            self.type_node_links.get(node).resolved_type = t;
+            let prev_slot = std::mem::replace(&mut self.type_node_links.get(node).resolved_type, t);
+            // infmemo1 (P4, Go :7702): an inner call stored first. Only an
+            // entry stored since this call began can have read that value.
+            self.infer_memo.lazy_store(
+                prev_slot.is_some()
+                    && prev_slot != t
+                    && self.infer_memo.store_count() != memo_stores,
+            );
             self.flow_type_cache = save_flow_type_cache;
             self.flow_loop_stack = save_flow_loop_stack;
         }
@@ -1629,7 +1639,9 @@ impl Checker {
         let any_type = self.any_type;
         self.push_contextual_type(node, any_type, false /*isCache*/);
         let t = self.check_expression_ex(node, CheckMode::SKIP_CONTEXT_SENSITIVE);
-        self.context_free_types.insert(node, t);
+        let prev_slot = self.context_free_types.insert(node, t);
+        self.infer_memo
+            .lazy_store(prev_slot.is_some_and(|prev| prev != t));
         self.pop_contextual_type();
         t
     }

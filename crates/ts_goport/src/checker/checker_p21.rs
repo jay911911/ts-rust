@@ -450,9 +450,17 @@ impl Checker {
                     break;
                 }
             }
+            // infmemo1 (P4, Go :19222).
+            let props: SharedList<SymbolId> = props.into();
+            let prev = &self
+                .ty(t)
+                .as_union_or_intersection_type()
+                .resolved_properties;
+            let overwrite = !prev.is_empty() && prev[..] != props[..];
+            self.infer_memo.lazy_store(overwrite);
             self.ty_mut(t)
                 .as_union_or_intersection_type_mut()
-                .resolved_properties = props.into();
+                .resolved_properties = props;
         }
     }
 
@@ -863,6 +871,8 @@ impl Checker {
         type_parameters: &[TypeId],
         type_arguments: &[TypeId],
     ) {
+        // infmemo1 (P2): the memo's store count when this call began.
+        let memo_stores = self.infer_memo.store_count();
         let mut mapper = MapperId::NIL;
         let mut members: SymbolTable;
         let mut call_signatures: SharedList<SignatureId>;
@@ -960,6 +970,7 @@ impl Checker {
                 index_infos = SharedList::concat(index_infos, SharedList::from(filtered));
             }
             let call_signature_count = call_signatures.len();
+            self.infer_memo_members_overwrite(t, memo_stores);
             self.set_structured_type_members_ex(
                 t,
                 members,
@@ -971,6 +982,7 @@ impl Checker {
             return;
         }
         let call_signature_count = call_signatures.len();
+        self.infer_memo_members_overwrite(t, memo_stores);
         self.set_structured_type_members_ex(
             t,
             members,
@@ -1056,6 +1068,9 @@ impl Checker {
             ) {
                 return self.ty(t).as_interface_type().resolved_base_types.clone();
             }
+            // infmemo1 (R5): members resolved from here to the reset below
+            // can be partial, so no walk that starts here is stored.
+            self.infer_memo.base_types_depth += 1;
             let t_symbol = self.ty(t).symbol;
             if self.ty(t).object_flags.intersects(ObjectFlags::TUPLE) {
                 let base = self.get_tuple_base_type(t);
@@ -1099,6 +1114,7 @@ impl Checker {
                     .without(ObjectFlags::MEMBERS_RESOLVED);
                 self.ty_mut(t).object_flags = object_flags;
             }
+            self.infer_memo.base_types_depth -= 1;
             self.ty_mut(t).as_interface_type_mut().base_types_resolved = true;
         }
         self.ty(t).as_interface_type().resolved_base_types.clone()
@@ -1481,7 +1497,9 @@ impl Checker {
             } else {
                 self.set_structured_type_members(t, SymbolTable::NIL, &[sig], &[], &[]);
             }
-            self.sig_mut(sig).isolated_signature_type = t;
+            let prev_slot = std::mem::replace(&mut self.sig_mut(sig).isolated_signature_type, t);
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != t);
         }
         self.sig(sig).isolated_signature_type
     }
@@ -1527,7 +1545,9 @@ impl Checker {
             .unwrap_or_default();
         if canonical.is_nil() {
             canonical = self.create_canonical_signature(signature);
-            self.cached_signatures.insert(key, canonical);
+            let prev_slot = self.cached_signatures.insert(key, canonical);
+            self.infer_memo
+                .lazy_store(prev_slot.is_some_and(|prev| prev != canonical));
         }
         canonical
     }
@@ -1616,7 +1636,9 @@ impl Checker {
         let mapper = self.new_type_mapper(&type_parameters, &base_constraints);
         let result =
             self.instantiate_signature_ex(signature, mapper, true /*eraseTypeParameters*/);
-        self.cached_signatures.insert(key, result);
+        let prev_slot = self.cached_signatures.insert(key, result);
+        self.infer_memo
+            .lazy_store(prev_slot.is_some_and(|prev| prev != result));
         result
     }
 

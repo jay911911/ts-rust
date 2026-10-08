@@ -662,15 +662,22 @@ impl Checker {
     pub fn is_empty_anonymous_object_type(&mut self, t: TypeId) -> bool {
         let object_flags = self.ty(t).object_flags;
         let symbol = self.ty(t).symbol;
-        object_flags.intersects(ObjectFlags::ANONYMOUS)
-            && (object_flags.intersects(ObjectFlags::MEMBERS_RESOLVED)
-                && self.is_empty_resolved_type(t)
-                || symbol.is_some()
-                    && self.sym(symbol).flags.intersects(SymbolFlags::TYPE_LITERAL)
-                    && {
-                        let members = self.get_members_of_symbol(symbol);
-                        self.symbols.len(members) == 0
-                    })
+        if !object_flags.intersects(ObjectFlags::ANONYMOUS) {
+            return false;
+        }
+        let type_literal =
+            symbol.is_some() && self.sym(symbol).flags.intersects(SymbolFlags::TYPE_LITERAL);
+        if !object_flags.intersects(ObjectFlags::MEMBERS_RESOLVED) && !type_literal {
+            // infmemo1 R7 (K9, go-model.md 15.1): a peek. The answer is false
+            // now and can be true once the members are resolved.
+            self.infer_memo.peek_taints += 1;
+            return false;
+        }
+        object_flags.intersects(ObjectFlags::MEMBERS_RESOLVED) && self.is_empty_resolved_type(t)
+            || type_literal && {
+                let members = self.get_members_of_symbol(symbol);
+                self.symbols.len(members) == 0
+            }
     }
 
     // Go: checker/checker.go:26946 isEmptyResolvedType
@@ -1148,7 +1155,9 @@ impl Checker {
             }
         }
         let result = self.get_union_type_ex(&types, UnionReduction::LITERAL, None, origin);
-        self.properties_types.insert(key, result);
+        let prev_slot = self.properties_types.insert(key, result);
+        self.infer_memo
+            .lazy_store(prev_slot.is_some_and(|prev| prev != result));
         result
     }
 
@@ -1250,7 +1259,10 @@ impl Checker {
                 self.type_node_links.get(node).resolved_type = error_type;
                 return error_type;
             }
+            // infmemo1 (R5): the links hold the marker until the store below.
+            self.infer_memo.computed_name_depth += 1;
             let resolved_type = self.check_expression(expression);
+            self.infer_memo.computed_name_depth -= 1;
             self.type_node_links.get(node).resolved_type = resolved_type;
             // This will allow types number, string, symbol or any. It will also allow enums, the unknown
             // type, and any union of these types (like string | number).

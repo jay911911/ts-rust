@@ -181,7 +181,9 @@ impl Checker {
         self.reverse_mapped_source_stack.pop();
         self.reverse_mapped_target_stack.pop();
         self.reverse_expanding_flags = save_expanding_flags;
-        self.reverse_mapped_cache.insert(key, t);
+        let prev_slot = self.reverse_mapped_cache.insert(key, t);
+        self.infer_memo
+            .lazy_store(prev_slot.is_some_and(|prev| prev != t));
         t
     }
 
@@ -358,7 +360,12 @@ impl Checker {
             } else {
                 self.unknown_type
             };
-            self.value_symbol_links.get(symbol).resolved_type = resolved;
+            let prev_slot = std::mem::replace(
+                &mut self.value_symbol_links.get(symbol).resolved_type,
+                resolved,
+            );
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != resolved);
         }
         self.value_symbol_links.get(symbol).resolved_type
     }

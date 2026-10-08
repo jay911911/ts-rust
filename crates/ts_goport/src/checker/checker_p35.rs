@@ -174,7 +174,12 @@ impl Checker {
                         let expr_type = self.check_expression_cached(name.expression());
                         let key_type = self.get_literal_type_from_property_name(name.name());
                         let index_symbol = self.get_applicable_index_symbol(expr_type, key_type);
-                        self.symbol_node_links.get(name).resolved_symbol = index_symbol;
+                        let prev_slot = std::mem::replace(
+                            &mut self.symbol_node_links.get(name).resolved_symbol,
+                            index_symbol,
+                        );
+                        self.infer_memo
+                            .lazy_store(prev_slot.is_some() && prev_slot != index_symbol);
                     }
                 } else {
                     self.check_qualified_name(name, CheckMode::NORMAL);
@@ -472,7 +477,10 @@ impl Checker {
                     }
                     let value_type = self.index_info(info).value_type;
                     self.value_symbol_links.get(symbol).resolved_type = value_type;
-                    self.index_info_mut(info).index_symbol = symbol;
+                    let prev_slot =
+                        std::mem::replace(&mut self.index_info_mut(info).index_symbol, symbol);
+                    self.infer_memo
+                        .lazy_store(prev_slot.is_some() && prev_slot != symbol);
                 }
             }
             return self.index_info(info).index_symbol;
@@ -500,8 +508,11 @@ impl Checker {
         }
 
         let contains_arguments = self.contains_arguments_reference_visit(node.body());
-        self.cached_arguments_referenced
+        let prev_slot = self
+            .cached_arguments_referenced
             .insert(node, contains_arguments);
+        self.infer_memo
+            .lazy_store(prev_slot.is_some_and(|prev| prev != contains_arguments));
         contains_arguments
     }
 

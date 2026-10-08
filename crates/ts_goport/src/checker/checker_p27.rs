@@ -51,7 +51,10 @@ impl Checker {
                     node.question_token().is_some(),
                 )
             };
-            self.type_node_links.get(node).resolved_type = resolved;
+            let prev_slot =
+                std::mem::replace(&mut self.type_node_links.get(node).resolved_type, resolved);
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != resolved);
         }
         self.type_node_links.get(node).resolved_type
     }
@@ -114,7 +117,10 @@ impl Checker {
                 alias,
                 TypeId::NIL, /*origin*/
             );
-            self.type_node_links.get(node).resolved_type = resolved;
+            let prev_slot =
+                std::mem::replace(&mut self.type_node_links.get(node).resolved_type, resolved);
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != resolved);
         }
         self.type_node_links.get(node).resolved_type
     }
@@ -150,7 +156,10 @@ impl Checker {
                 IntersectionFlags::NONE
             };
             let resolved = self.get_intersection_type_ex(&types, flags, alias);
-            self.type_node_links.get(node).resolved_type = resolved;
+            let prev_slot =
+                std::mem::replace(&mut self.type_node_links.get(node).resolved_type, resolved);
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != resolved);
         }
         self.type_node_links.get(node).resolved_type
     }
@@ -167,7 +176,10 @@ impl Checker {
                 types[i] = self.get_type_from_type_node(span.type_());
             }
             let resolved = self.get_template_literal_type(&texts, &types);
-            self.type_node_links.get(node).resolved_type = resolved;
+            let prev_slot =
+                std::mem::replace(&mut self.type_node_links.get(node).resolved_type, resolved);
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != resolved);
         }
         self.type_node_links.get(node).resolved_type
     }
@@ -179,7 +191,9 @@ impl Checker {
             self.ty_mut(t).as_mapped_type_mut().declaration = node;
             let alias = self.get_alias_for_type_node(node);
             self.ty_mut(t).alias = alias;
-            self.type_node_links.get(node).resolved_type = t;
+            let prev_slot = std::mem::replace(&mut self.type_node_links.get(node).resolved_type, t);
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != t);
             // Eagerly resolve the constraint type which forces an error if the constraint type circularly
             // references itself through one or more type aliases.
             self.get_constraint_type_from_mapped_type(t);
@@ -229,7 +243,10 @@ impl Checker {
                 false,         /*forConstraint*/
                 None,
             );
-            self.type_node_links.get(node).resolved_type = resolved;
+            let prev_slot =
+                std::mem::replace(&mut self.type_node_links.get(node).resolved_type, resolved);
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != resolved);
             // PORT: Go tests `outerTypeParameters != nil`. A non-nil empty list only
             // creates a map that is never read (instantiations are only used when
             // there are outer type parameters), so testing for non-empty is equivalent.
@@ -682,7 +699,12 @@ impl Checker {
             };
             let true_type = self.get_type_from_type_node(true_type_node);
             let resolved = self.instantiate_type(true_type, mapper);
-            self.ty_mut(t).as_conditional_type_mut().resolved_true_type = resolved;
+            let prev_slot = std::mem::replace(
+                &mut self.ty_mut(t).as_conditional_type_mut().resolved_true_type,
+                resolved,
+            );
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != resolved);
         }
         self.ty(t).as_conditional_type().resolved_true_type
     }
@@ -701,7 +723,12 @@ impl Checker {
             };
             let false_type = self.get_type_from_type_node(false_type_node);
             let resolved = self.instantiate_type(false_type, mapper);
-            self.ty_mut(t).as_conditional_type_mut().resolved_false_type = resolved;
+            let prev_slot = std::mem::replace(
+                &mut self.ty_mut(t).as_conditional_type_mut().resolved_false_type,
+                resolved,
+            );
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != resolved);
         }
         self.ty(t).as_conditional_type().resolved_false_type
     }
@@ -724,9 +751,15 @@ impl Checker {
             } else {
                 self.get_true_type_from_conditional_type(t)
             };
-            self.ty_mut(t)
-                .as_conditional_type_mut()
-                .resolved_inferred_true_type = resolved;
+            let prev_slot = std::mem::replace(
+                &mut self
+                    .ty_mut(t)
+                    .as_conditional_type_mut()
+                    .resolved_inferred_true_type,
+                resolved,
+            );
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != resolved);
         }
         self.ty(t).as_conditional_type().resolved_inferred_true_type
     }
@@ -736,7 +769,10 @@ impl Checker {
         if self.type_node_links.get(node).resolved_type.is_nil() {
             let symbol = self.get_symbol_of_declaration(node.type_parameter());
             let resolved = self.get_declared_type_of_type_parameter(symbol);
-            self.type_node_links.get(node).resolved_type = resolved;
+            let prev_slot =
+                std::mem::replace(&mut self.type_node_links.get(node).resolved_type, resolved);
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != resolved);
         }
         self.type_node_links.get(node).resolved_type
     }
@@ -750,7 +786,12 @@ impl Checker {
                 let unknown_symbol = self.unknown_symbol;
                 self.symbol_node_links.get(node).resolved_symbol = unknown_symbol;
                 let error_type = self.error_type;
-                self.type_node_links.get(node).resolved_type = error_type;
+                let prev_slot = std::mem::replace(
+                    &mut self.type_node_links.get(node).resolved_type,
+                    error_type,
+                );
+                self.infer_memo
+                    .lazy_store(prev_slot.is_some() && prev_slot != error_type);
                 return error_type;
             }
             let target_meaning = if n.is_type_of() {
@@ -771,7 +812,12 @@ impl Checker {
                 let unknown_symbol = self.unknown_symbol;
                 self.symbol_node_links.get(node).resolved_symbol = unknown_symbol;
                 let error_type = self.error_type;
-                self.type_node_links.get(node).resolved_type = error_type;
+                let prev_slot = std::mem::replace(
+                    &mut self.type_node_links.get(node).resolved_type,
+                    error_type,
+                );
+                self.infer_memo
+                    .lazy_store(prev_slot.is_some() && prev_slot != error_type);
                 return error_type;
             }
             let module_symbol = self.resolve_external_module_symbol(
@@ -843,7 +889,12 @@ impl Checker {
                             args![namespace_name, declaration_name_to_string(current)],
                         );
                         let error_type = self.error_type;
-                        self.type_node_links.get(node).resolved_type = error_type;
+                        let prev_slot = std::mem::replace(
+                            &mut self.type_node_links.get(node).resolved_type,
+                            error_type,
+                        );
+                        self.infer_memo
+                            .lazy_store(prev_slot.is_some() && prev_slot != error_type);
                         return error_type;
                     }
                     self.symbol_node_links.get(current).resolved_symbol = next;
@@ -852,13 +903,19 @@ impl Checker {
                 }
                 let resolved =
                     self.resolve_import_symbol_type(node, current_namespace, target_meaning);
-                self.type_node_links.get(node).resolved_type = resolved;
+                let prev_slot =
+                    std::mem::replace(&mut self.type_node_links.get(node).resolved_type, resolved);
+                self.infer_memo
+                    .lazy_store(prev_slot.is_some() && prev_slot != resolved);
             } else if self
                 .get_symbol_flags(module_symbol)
                 .intersects(target_meaning)
             {
                 let resolved = self.resolve_import_symbol_type(node, module_symbol, target_meaning);
-                self.type_node_links.get(node).resolved_type = resolved;
+                let prev_slot =
+                    std::mem::replace(&mut self.type_node_links.get(node).resolved_type, resolved);
+                self.infer_memo
+                    .lazy_store(prev_slot.is_some() && prev_slot != resolved);
             } else {
                 let message = if target_meaning == SymbolFlags::VALUE {
                     diag::Module_0_does_not_refer_to_a_value_but_is_used_as_a_value_here
@@ -869,7 +926,12 @@ impl Checker {
                 let unknown_symbol = self.unknown_symbol;
                 self.symbol_node_links.get(node).resolved_symbol = unknown_symbol;
                 let error_type = self.error_type;
-                self.type_node_links.get(node).resolved_type = error_type;
+                let prev_slot = std::mem::replace(
+                    &mut self.type_node_links.get(node).resolved_type,
+                    error_type,
+                );
+                self.infer_memo
+                    .lazy_store(prev_slot.is_some() && prev_slot != error_type);
             }
         }
         self.type_node_links.get(node).resolved_type
@@ -938,7 +1000,10 @@ impl Checker {
             let members = self.create_symbol_table(&[meta_property_symbol]);
             self.sym_mut(symbol).members = members;
             let t = self.new_anonymous_type(symbol, members, &[], &[], &[]);
-            self.deferred_global_import_meta_expression_type = t;
+            let prev_slot =
+                std::mem::replace(&mut self.deferred_global_import_meta_expression_type, t);
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != t);
         }
         self.deferred_global_import_meta_expression_type
     }
@@ -1356,9 +1421,15 @@ impl Checker {
         {
             let unique_literal_mapper = self.unique_literal_mapper;
             let instantiated = self.instantiate_type(t, unique_literal_mapper);
-            self.ty_mut(t)
-                .as_intersection_type_mut()
-                .unique_literal_filled_instantiation = instantiated;
+            let prev_slot = std::mem::replace(
+                &mut self
+                    .ty_mut(t)
+                    .as_intersection_type_mut()
+                    .unique_literal_filled_instantiation,
+                instantiated,
+            );
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != instantiated);
         }
         let filled = self
             .ty(t)

@@ -739,7 +739,9 @@ impl Checker {
         if first_antecedent_type.incomplete {
             return self.new_flow_type(result, true /*incomplete*/);
         }
-        self.flow_loop_cache.insert(key, result);
+        let prev_slot = self.flow_loop_cache.insert(key, result);
+        self.infer_memo
+            .lazy_store(prev_slot.is_some_and(|prev| prev != result));
         FlowType {
             t: result,
             incomplete: false,

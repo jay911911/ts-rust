@@ -228,6 +228,8 @@ pub struct PlainResultTable {
     /// Empty (no allocation) until the first insert; else a power of two.
     slots: Box<[u64]>,
     used: usize,
+    /// infmemo1 (P3): overwrites that changed the `Succeeded` bit.
+    flips: u32,
 }
 
 impl PlainResultTable {
@@ -265,6 +267,8 @@ impl PlainResultTable {
             loop {
                 let old = self.slots[i];
                 if old >> RESULT_BITS == packed {
+                    let succeeded = u64::from(RelationComparisonResult::SUCCEEDED.bits());
+                    self.flips += u32::from((old ^ entry) & succeeded != 0);
                     self.slots[i] = entry;
                     return;
                 }
@@ -320,6 +324,9 @@ pub struct Relation {
     /// Plain keys with an id of 2^28 or more.
     pub plain_wide: FlatMap<PlainRelationKey, RelationComparisonResult>,
     pub generic: FlatMap<CacheHashKey, RelationComparisonResult>,
+    /// infmemo1 (P3): overwrites of `plain_wide` and `generic` that changed
+    /// the `Succeeded` bit.
+    flips: u32,
 }
 
 impl Relation {
@@ -342,13 +349,30 @@ impl Relation {
             RelationKey::Plain(key) => match key.packed() {
                 Some(packed) => self.plain.insert(packed, result),
                 None => {
-                    self.plain_wide.insert(key, result);
+                    let old = self.plain_wide.insert(key, result);
+                    self.count_flip(old, result);
                 }
             },
             RelationKey::Generic(key) => {
-                self.generic.insert(key, result);
+                let old = self.generic.insert(key, result);
+                self.count_flip(old, result);
             }
         }
+    }
+
+    /// infmemo1 (P3, go-model.md 14.2 K6): counts an overwrite that changed
+    /// the `Succeeded` bit.
+    #[inline]
+    fn count_flip(&mut self, old: Option<RelationComparisonResult>, new: RelationComparisonResult) {
+        if let Some(old) = old {
+            let succeeded = RelationComparisonResult::SUCCEEDED;
+            self.flips += u32::from(old.intersects(succeeded) != new.intersects(succeeded));
+        }
+    }
+
+    /// infmemo1 (P3): the `Succeeded` flips of this relation so far.
+    pub fn flips(&self) -> u32 {
+        self.flips.wrapping_add(self.plain.flips)
     }
 
     // Go: checker/relater.go:113 Relation.size
@@ -733,6 +757,18 @@ impl Checker {
         false
     }
 
+    /// Go `c.enumRelation[key] = result` (relater.go:313-335). infmemo1
+    /// (P3): purges the memo when the store changes the `Succeeded` bit.
+    fn set_enum_relation(&mut self, key: EnumRelationKey, result: RelationComparisonResult) {
+        let succeeded = RelationComparisonResult::SUCCEEDED;
+        if let Some(old) = self.enum_relation.insert(key, result)
+            && old.intersects(succeeded) != result.intersects(succeeded)
+        {
+            self.infer_memo
+                .purge(crate::checker::infer_memo::Purge::Relation);
+        }
+    }
+
     // Go: checker/relater.go:281 isEnumTypeRelatedTo
     pub fn is_enum_type_related_to(
         &mut self,
@@ -808,8 +844,7 @@ impl Checker {
                             args![property_string, type_string],
                         );
                     }
-                    self.enum_relation
-                        .insert(key, RelationComparisonResult::FAILED);
+                    self.set_enum_relation(key, RelationComparisonResult::FAILED);
                     return false;
                 }
                 let source_declaration =
@@ -833,8 +868,7 @@ impl Checker {
                                 args![target_symbol_string, target_property_string, target_value_string, source_value_string],
                             );
                         }
-                        self.enum_relation
-                            .insert(key, RelationComparisonResult::FAILED);
+                        self.set_enum_relation(key, RelationComparisonResult::FAILED);
                         return false;
                     }
                     // At this point we know that at least one of the values is 'undefined'.
@@ -866,15 +900,13 @@ impl Checker {
                                 args![target_symbol_string, target_property_string, known_string],
                             );
                         }
-                        self.enum_relation
-                            .insert(key, RelationComparisonResult::FAILED);
+                        self.set_enum_relation(key, RelationComparisonResult::FAILED);
                         return false;
                     }
                 }
             }
         }
-        self.enum_relation
-            .insert(key, RelationComparisonResult::SUCCEEDED);
+        self.set_enum_relation(key, RelationComparisonResult::SUCCEEDED);
         true
     }
 

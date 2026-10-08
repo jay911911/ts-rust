@@ -1002,6 +1002,10 @@ impl Checker {
         let constrained = self.ty_mut(t).as_constrained_type_mut();
         if constrained.resolved_base_constraint.is_nil() {
             constrained.resolved_base_constraint = constraint;
+        } else if constrained.resolved_base_constraint != constraint {
+            // infmemo1 R7 (Go :27949-27952): an inner call stored another
+            // constraint first, and later reads get that one.
+            self.infer_memo.return_taints += 1;
         }
         constraint
     }
@@ -1482,8 +1486,10 @@ impl Checker {
                 .intersects(ObjectFlags::IS_UNKNOWN_LIKE_UNION_COMPUTED)
             {
                 self.ty_mut(t).object_flags |= ObjectFlags::IS_UNKNOWN_LIKE_UNION_COMPUTED;
+                // infmemo1 (R5): an early-flag window (Go :28270-28275).
+                self.infer_memo.early_flags_depth += 1;
                 let count = self.ty(t).types().len();
-                if count >= 3
+                let unknown_like = count >= 3
                     && self
                         .ty(self.type_at(t, 0))
                         .flags
@@ -1492,10 +1498,11 @@ impl Checker {
                         .ty(self.type_at(t, 1))
                         .flags
                         .intersects(TypeFlags::NULL)
-                    && (0..count).any(|i| self.is_empty_anonymous_object_type(self.type_at(t, i)))
-                {
+                    && (0..count).any(|i| self.is_empty_anonymous_object_type(self.type_at(t, i)));
+                if unknown_like {
                     self.ty_mut(t).object_flags |= ObjectFlags::IS_UNKNOWN_LIKE_UNION;
                 }
+                self.infer_memo.early_flags_depth -= 1;
             }
             return self
                 .ty(t)

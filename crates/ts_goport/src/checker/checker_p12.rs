@@ -107,6 +107,9 @@ impl Checker {
             }
             let context_type_parameters = self.sig(context).type_parameters.clone();
             let origin = self.share_type_parameters_origin(context);
+            // infmemo1 (P5, go-model.md 15.1): a walk can have read the
+            // signature without type parameters.
+            self.infer_memo.contextual_write(sig);
             let s = self.sig_mut(sig);
             s.type_parameters = context_type_parameters;
             s.type_parameters_origin = origin;
@@ -126,6 +129,9 @@ impl Checker {
                 if parameter.is_nil() {
                     let this_parameter = self
                         .create_symbol_with_type(context_this_parameter, TypeId::NIL /*type*/);
+                    // infmemo1 (P5): a walk can have read the signature
+                    // without `this`.
+                    self.infer_memo.contextual_write(sig);
                     self.sig_mut(sig).this_parameter = this_parameter;
                 }
                 let this_parameter = self.sig(sig).this_parameter;
@@ -620,7 +626,9 @@ impl Checker {
             non_applicable_type: TypeId::NIL,
         };
         let result = self.instantiation_expression_get_instantiated_type(&mut state, expr_type);
-        self.instantiation_expression_types.insert(key, result);
+        let prev_slot = self.instantiation_expression_types.insert(key, result);
+        self.infer_memo
+            .lazy_store(prev_slot.is_some_and(|prev| prev != result));
         let error_type = if state.has_some_applicable_signature {
             state.non_applicable_type
         } else {

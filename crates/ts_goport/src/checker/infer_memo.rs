@@ -7,22 +7,31 @@
 //! stored by its inputs. A later walk with equal inputs writes the stored
 //! outcome and does not walk. The rule and its proof are in
 //! `target/continuation-r97-goport/studies/tsrsperf1/infmemo1/go-model.md`
-//! (round 2, sections 7 and 13). In short:
+//! (round 2, sections 7 and 13; round 3, sections 14 and 15). In short:
 //! - R0: lookups and stores run only outside an LSP rollback scope
-//!   (services.go:367 `runWithoutResolvedSignatureCaching`).
+//!   (services.go:367 `runWithoutResolvedSignatureCaching`) and (R0b)
+//!   outside the IIFE override of a resolved signature (checker.go:29954).
 //! - R1 key: source, target, `n.priority`, `contravariant`, and per info
 //!   (at most 8) the type parameter, both candidate lists in order, priority,
 //!   `topLevel`, `isFixed`, implied arity and whether the lists exist.
 //! - R5 start: no instantiation (active mapper), variance computation,
 //!   reverse mapped inference, early-set member resolution, type predicate
-//!   inference or indexed access simplification is in progress; the
+//!   inference, indexed access simplification, `getBaseTypes` body,
+//!   late-bound member window, computed property name check, overload
+//!   failure window or early-flag window is in progress; the
 //!   instantiation count is under the TS2589 limit; the serialization level
 //!   is under its limit.
 //! - R2-R4, R6, R7 during the walk: it made no type, symbol, signature,
 //!   mapper, index info, predicate, instantiation map or inference context,
 //!   ran no nested walk, left both instantiation counts as they were, reset
 //!   no count, added no diagnostic (also no deferred one), added no
-//!   reliability bits, and read no transient state (taints).
+//!   reliability bits, read no transient state (taints), got no getter
+//!   value that differs from its link, made no peek of an empty slot, and
+//!   saw no purge.
+//! - R9 purges: the table is cleared when Go replaces a value that a stored
+//!   walk can have read: a member overwrite (P2), a relation result flip
+//!   (P3), a lazy store over another value (P4), or a contextual write of a
+//!   signature's type parameters or `this` (P5).
 //! - R8 tuning: the walk took at least `min_steps` steps, and an earlier walk
 //!   of that many steps marked the target.
 //! - A hit writes each changed info's candidate lists, priority and
@@ -35,7 +44,8 @@
 //! the first n hits of the process (to find a hit that changes output).
 //! `GOPORT_INFERMEMO_MIN_STEPS` sets the 16 (0 keys every walk).
 //! `GOPORT_INFERMEMO_IGNORE=<rule>,...` (names as in the stats) stores walks
-//! that break only those rules: a test of a rule, never for real runs.
+//! that break only those rules, and does not purge for the named purge
+//! causes: a test of a rule, never for real runs.
 
 use crate::checker::inference_p1::InferenceState;
 use crate::prelude::*;
@@ -80,7 +90,13 @@ fn ignored_rules_from_env() -> u32 {
         let names = std::env::var("GOPORT_INFERMEMO_IGNORE").unwrap_or_default();
         names
             .split(',')
-            .filter_map(|name| RULE_NAMES.iter().position(|r| *r == name))
+            .filter_map(|name| {
+                RULE_NAMES
+                    .iter()
+                    .chain(PURGE_NAMES.iter())
+                    .chain([IIFE_SCOPE_NAME].iter())
+                    .position(|r| *r == name)
+            })
             .fold(0, |bits, rule| bits | 1 << rule)
     })
 }
@@ -97,6 +113,31 @@ fn max_hits() -> u64 {
 }
 
 static REPLAYED: AtomicU64 = AtomicU64::new(0);
+
+thread_local! {
+    /// V1 (go-model.md 14.5, 15.5): link records made on this thread. A walk
+    /// runs to its end on one thread, so verify mode reads it before and
+    /// after a walk. Only the verify branch's `core.rs` bumps it
+    /// (`note_link_record`), so on other builds it stays 0.
+    static LINK_RECORDS_MADE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// True once `note_link_record` ran: the stats say whether verify mode
+/// checked link records.
+static LINK_RECORDS_WIRED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Counts one new link record (`LinkStore::get` on an empty key). Called
+/// from `core.rs` on the verify branch only.
+#[cold]
+pub fn note_link_record() {
+    LINK_RECORDS_MADE.with(|c| c.set(c.get() + 1));
+    LINK_RECORDS_WIRED.store(true, Ordering::Relaxed);
+}
+
+fn link_records_made() -> u64 {
+    LINK_RECORDS_MADE.with(std::cell::Cell::get)
+}
 
 /// Why a long keyed walk was not stored. A walk can break several rules.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -142,9 +183,32 @@ pub enum Rule {
     /// R7 (C3): read the type of a parameter that Go does not store
     /// (checker.go:16875).
     ParamTaint,
+    /// R5 (round 3): started inside a `getBaseTypes` body, where members
+    /// can be partial (checker.go:19510-19537, issue 16861).
+    BaseTypes,
+    /// R5: started between the early and the final store of late-bound
+    /// members (checker.go:16260-16293).
+    LateBound,
+    /// R5: started inside `checkComputedPropertyName` (checker.go:27267).
+    ComputedName,
+    /// R5: started after `resolveCall` stored its failure candidate
+    /// (checker.go:9128).
+    OverloadFailure,
+    /// R5: started inside an early-flag window: `isDiscriminantProperty`
+    /// (relater.go:1084), `isUnknownLikeUnionType` (checker.go:28270) and,
+    /// after the int52 rebase, `getReducedType` (checker.go:22189).
+    EarlyFlags,
+    /// R7: a getter returned a value that is not the one in its link
+    /// (checker.go:16875-16878, :27949-27952).
+    ReturnTaint,
+    /// R7 (K9): a peek of an empty slot (`IsEmptyAnonymousObjectType` on a
+    /// type whose members are not resolved, checker.go:26941).
+    PeekTaint,
+    /// R9: a purge ran during the walk.
+    Purged,
 }
 
-const RULES: usize = 16;
+const RULES: usize = 24;
 const RULE_NAMES: [&str; RULES] = [
     "created",
     "nested",
@@ -162,7 +226,45 @@ const RULE_NAMES: [&str; RULES] = [
     "reliability",
     "taint",
     "param_taint",
+    "base_types",
+    "late_bound",
+    "computed_name",
+    "overload_failure",
+    "early_flags",
+    "return_taint",
+    "peek_taint",
+    "purged",
 ];
+
+/// Why the table was purged (R9).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Purge {
+    /// P2: `setStructuredTypeMembers` on a type with resolved members
+    /// (checker.go:25611).
+    Members,
+    /// P3: a relation or `enumRelation` result changed its `Succeeded` bit
+    /// (relater.go:106, :291-335).
+    Relation,
+    /// P4: a lazy store found its slot set to another value (go-model.md
+    /// 14.2 K5, 15.3).
+    LazyStore,
+    /// P5: `assignContextualParameterTypes` set a signature's type
+    /// parameters or `this` parameter (checker.go:10552, :10558).
+    Contextual,
+}
+
+const PURGES: usize = 4;
+const PURGE_NAMES: [&str; PURGES] = [
+    "purge_members",
+    "purge_relation",
+    "purge_lazy_store",
+    "purge_contextual",
+];
+
+/// The `GOPORT_INFERMEMO_IGNORE` name of the R0b scope (bit `RULES +
+/// PURGES`): walks inside the IIFE override are keyed as elsewhere.
+const IIFE_SCOPE_NAME: &str = "iife_scope";
 
 #[derive(Clone, Copy)]
 #[repr(usize)]
@@ -178,8 +280,10 @@ enum Stat {
     OverMax,
     Verified,
     Lost,
+    /// R0b: walks inside the IIFE override (no lookup, no store).
+    IifeScoped,
 }
-const STATS: usize = 11;
+const STATS: usize = 12;
 const STAT_NAMES: [&str; STATS] = [
     "walks",
     "lookups",
@@ -192,8 +296,9 @@ const STAT_NAMES: [&str; STATS] = [
     "over_max",
     "verified",
     "lost",
+    "iife_scoped",
 ];
-const SLOTS: usize = STATS + 2 * RULES;
+const SLOTS: usize = STATS + 2 * RULES + PURGES;
 static TOTALS: [AtomicU64; SLOTS] = [const { AtomicU64::new(0) }; SLOTS];
 
 /// Writes the process totals to `GOPORT_INFERMEMO_STATS` (called once the
@@ -213,6 +318,13 @@ pub fn write_infer_memo_stats() {
     for (i, name) in RULE_NAMES.iter().enumerate() {
         text.push_str(&format!(" only_{name} {}", total[STATS + RULES + i]));
     }
+    for (i, name) in PURGE_NAMES.iter().enumerate() {
+        text.push_str(&format!(" {name} {}", total[STATS + 2 * RULES + i]));
+    }
+    text.push_str(&format!(
+        " link_records_checked {}",
+        u8::from(LINK_RECORDS_WIRED.load(Ordering::Relaxed))
+    ));
     text.push('\n');
     let _ = std::fs::write(path, text);
 }
@@ -278,6 +390,29 @@ pub struct InferMemo {
     pub predicate_depth: u32,
     /// Running indexed access simplifications (C2).
     pub simplify_depth: u32,
+    /// Running `getBaseTypes` bodies, from the push to the member reset.
+    pub base_types_depth: u32,
+    /// Open late-bound member windows (early store to final store).
+    pub late_bound_depth: u32,
+    /// Running `checkComputedPropertyName` misses.
+    pub computed_name_depth: u32,
+    /// Open overload-failure windows of `resolveCall`.
+    pub overload_failure_depth: u32,
+    /// Open early-flag windows.
+    pub early_flags_depth: u32,
+    /// Open IIFE overrides of a resolved signature (R0b).
+    pub iife_depth: u32,
+    /// Getter values that differ from their link (R7).
+    pub return_taints: u32,
+    /// Peeks of an empty slot (R7, K9).
+    pub peek_taints: u32,
+    /// Purges so far (R9).
+    pub purges: u32,
+    /// The summed `Succeeded` flips of the relations at the last check (P3).
+    pub relation_flips: u32,
+    /// P5: the store count when each signature of a function expression,
+    /// arrow function or object literal method was made.
+    signature_stores: FxHashMap<SignatureId, u64>,
     /// Verify mode: `trace` takes each step.
     pub tracing: bool,
     pub trace: u64,
@@ -311,6 +446,17 @@ impl Default for InferMemo {
             early_members_depth: 0,
             predicate_depth: 0,
             simplify_depth: 0,
+            base_types_depth: 0,
+            late_bound_depth: 0,
+            computed_name_depth: 0,
+            overload_failure_depth: 0,
+            early_flags_depth: 0,
+            iife_depth: 0,
+            return_taints: 0,
+            peek_taints: 0,
+            purges: 0,
+            relation_flips: 0,
+            signature_stores: FxHashMap::default(),
             tracing: mode == InferMemoMode::Verify,
             trace: 0,
             bypass: 0,
@@ -356,6 +502,56 @@ impl InferMemo {
     pub fn set_mode(&mut self, mode: InferMemoMode) {
         self.mode = mode;
         self.tracing = mode == InferMemoMode::Verify;
+    }
+
+    /// R9: clears the table when Go replaced a value that a stored walk can
+    /// have read. Keeps the long-target marks (R8). A walk that runs now is
+    /// not stored (`Rule::Purged`). Does nothing when the memo is off.
+    #[cold]
+    #[inline(never)]
+    pub fn purge(&mut self, cause: Purge) {
+        if self.mode == InferMemoMode::Off
+            || self.ignored_rules & 1 << (RULES + cause as usize) != 0
+        {
+            return;
+        }
+        self.entries.clear();
+        self.purges = self.purges.wrapping_add(1);
+        self.count(STATS + 2 * RULES + cause as usize, 1);
+    }
+
+    /// Walks stored so far by this checker (P2, P5).
+    pub fn store_count(&self) -> u64 {
+        self.counts[Stat::Stores as usize]
+    }
+
+    /// P5: records when `sig` was made (Go `getSignatureFromDeclaration`
+    /// of a function expression, arrow function or object literal method).
+    pub fn note_contextual_signature(&mut self, sig: SignatureId) {
+        if self.mode != InferMemoMode::Off {
+            self.signature_stores
+                .insert(sig, self.counts[Stat::Stores as usize]);
+        }
+    }
+
+    /// P5: `assignContextualParameterTypes` sets the type parameters or the
+    /// `this` parameter of `sig`. Only an entry stored after `sig` was made
+    /// can have read it, so there is nothing to purge when no walk was
+    /// stored since. A walk that runs now is not stored anyway: Go assigns
+    /// inside `checkExpression`, which resets the count (R3).
+    pub fn contextual_write(&mut self, sig: SignatureId) {
+        if self.signature_stores.get(&sig) != Some(&self.counts[Stat::Stores as usize]) {
+            self.purge(Purge::Contextual);
+        }
+    }
+
+    /// P4: a lazy store (go-model.md 14.2 K5) is about to write its slot.
+    /// `overwrite` is true when the slot holds another value.
+    #[inline]
+    pub fn lazy_store(&mut self, overwrite: bool) {
+        if overwrite {
+            self.purge(Purge::LazyStore);
+        }
     }
 
     fn count(&mut self, slot: usize, n: u64) {
@@ -449,6 +645,9 @@ struct WalkReads {
     effects_before: Effects,
     taints: u32,
     param_taints: u32,
+    return_taints: u32,
+    peek_taints: u32,
+    purges: u32,
     clears: u32,
     saved_min_resolution: u32,
     saved_min_loop: u32,
@@ -557,7 +756,31 @@ impl Checker {
             self.serialization_level >= MAX_SERIALIZATION_LEVEL,
             Rule::Serialization,
         );
+        add(m.base_types_depth != 0, Rule::BaseTypes);
+        add(m.late_bound_depth != 0, Rule::LateBound);
+        add(m.computed_name_depth != 0, Rule::ComputedName);
+        add(m.overload_failure_depth != 0, Rule::OverloadFailure);
+        add(m.early_flags_depth != 0, Rule::EarlyFlags);
         rules
+    }
+
+    /// P3: purges when a relation result changed its `Succeeded` bit since
+    /// the last check. Runs before each lookup and at the end of each walk,
+    /// so no entry is read, and no walk is stored, across a flip.
+    fn infer_memo_sync_flips(&mut self) {
+        let flips = [
+            &self.subtype_relation,
+            &self.strict_subtype_relation,
+            &self.assignable_relation,
+            &self.comparable_relation,
+            &self.identity_relation,
+        ]
+        .iter()
+        .fold(0u32, |sum, r| sum.wrapping_add(r.borrow().flips()));
+        if flips != self.infer_memo.relation_flips {
+            self.infer_memo.relation_flips = flips;
+            self.infer_memo.purge(Purge::Relation);
+        }
     }
 
     /// Builds the key of a walk (R1) in `key`. False when the walk has no
@@ -607,6 +830,9 @@ impl Checker {
             effects_before: self.infer_memo_effects(),
             taints: self.infer_memo.taints,
             param_taints: self.infer_memo.param_taints,
+            return_taints: self.infer_memo.return_taints,
+            peek_taints: self.infer_memo.peek_taints,
+            purges: self.infer_memo.purges,
             clears: self.infer_memo.clears,
             saved_min_resolution: self.infer_memo.taint_min_resolution,
             saved_min_loop: self.infer_memo.taint_min_loop,
@@ -629,6 +855,7 @@ impl Checker {
     /// walk broke (R2-R4, R6, R7), its steps, its trace hash and whether it
     /// cleared the cached inferences.
     fn infer_memo_end(&mut self, reads: &WalkReads) -> (u32, u32, u64, bool) {
+        self.infer_memo_sync_flips();
         let after = self.infer_memo_effects();
         let before = &reads.effects_before;
         let added_reliability = self.reliability_flags;
@@ -678,6 +905,9 @@ impl Checker {
         add(!added_reliability.is_empty(), Rule::Reliability);
         add(tainted, Rule::Taint);
         add(m.param_taints != reads.param_taints, Rule::ParamTaint);
+        add(m.return_taints != reads.return_taints, Rule::ReturnTaint);
+        add(m.peek_taints != reads.peek_taints, Rule::PeekTaint);
+        add(m.purges != reads.purges, Rule::Purged);
         (rules, steps, trace, m.clears != reads.clears)
     }
 
@@ -700,6 +930,14 @@ impl Checker {
             self.infer_from_types(n, source, target);
             return;
         }
+        if self.infer_memo.iife_depth != 0
+            && self.infer_memo.ignored_rules & 1 << (RULES + PURGES) == 0
+        {
+            // R0b: the IIFE override puts back a value that can be final.
+            self.infer_memo.count(Stat::IifeScoped as usize, 1);
+            self.infer_from_types(n, source, target);
+            return;
+        }
         if self.infer_memo.min_steps != 0 && !self.infer_memo.long_targets.contains(&target) {
             let before = self.infer_memo.steps;
             self.infer_from_types(n, source, target);
@@ -716,6 +954,7 @@ impl Checker {
             return;
         }
         self.infer_memo.count(Stat::Lookups as usize, 1);
+        self.infer_memo_sync_flips();
         if self.infer_memo.entries.contains_key(key.as_slice()) {
             if max_hits() != u64::MAX && REPLAYED.fetch_add(1, Ordering::Relaxed) >= max_hits() {
                 self.infer_memo.key = key;
@@ -841,12 +1080,14 @@ impl Checker {
         let (entry_cleared, entry_steps, entry_trace) = (entry.cleared, entry.steps, entry.trace);
         let start_rules = self.infer_memo_start_rules();
         let caches_before = self.infer_memo_cache_sizes();
+        let records_before = link_records_made();
         let reads = self.infer_memo_begin();
         self.infer_memo.bypass += 1;
         self.infer_from_types(n, source, target);
         self.infer_memo.bypass -= 1;
         let (rules, steps, trace, cleared) = self.infer_memo_end(&reads);
         let caches_after = self.infer_memo_cache_sizes();
+        let records_made = link_records_made() - records_before;
         let outcome = self.infer_memo_info_states(ctx);
         self.infer_memo
             .count(Stat::HitSteps as usize, u64::from(steps));
@@ -869,6 +1110,8 @@ impl Checker {
             ))
         } else if caches_after != caches_before {
             Some(format!("caches {caches_before:?} -> {caches_after:?}"))
+        } else if records_made != 0 {
+            Some(format!("made {records_made} link records"))
         } else {
             None
         };
@@ -898,9 +1141,41 @@ impl Checker {
 mod tests {
     use super::*;
 
-    /// Diagnostics as (code, start), and each keyed walk as (source,
-    /// target, event).
-    type Checked = (Vec<(i32, i32)>, Vec<(String, String, MemoEvent)>);
+    /// One check of `a.ts`.
+    struct Checked {
+        /// Diagnostics as (code, start).
+        diagnostics: Vec<(i32, i32)>,
+        /// Each keyed walk as (source, target, event).
+        log: Vec<(String, String, MemoEvent)>,
+        /// The symbol, type and instantiation counts
+        /// (`--extendedDiagnostics`).
+        sizes: (u32, u32, u32),
+        /// The memo's counters (`InferMemo::counts`).
+        counts: [u64; SLOTS],
+    }
+
+    impl Checked {
+        /// The output that Go's run must match: diagnostics and sizes.
+        fn output(&self) -> (&[(i32, i32)], (u32, u32, u32)) {
+            (&self.diagnostics, self.sizes)
+        }
+
+        /// A counter by its stats name (`lost_<rule>`, a purge or a stat).
+        fn count(&self, name: &str) -> u64 {
+            let lost = |n: &str| RULE_NAMES.iter().position(|r| *r == n);
+            let slot = if let Some(rule) = name.strip_prefix("lost_").and_then(lost) {
+                STATS + rule
+            } else if let Some(i) = PURGE_NAMES.iter().position(|r| *r == name) {
+                STATS + 2 * RULES + i
+            } else {
+                STAT_NAMES
+                    .iter()
+                    .position(|r| *r == name)
+                    .unwrap_or_else(|| panic!("no counter {name}"))
+            };
+            self.counts[slot]
+        }
+    }
 
     /// Checks `a.ts` (`source`, strict) in a new project with the memo in
     /// `mode`, every walk keyed (`min_steps` 0) and the `ignored` rules not
@@ -943,15 +1218,37 @@ mod tests {
                 .into_iter()
                 .map(|(s, t, e)| (checker.type_to_string(s), checker.type_to_string(t), e))
                 .collect();
-            (diagnostics, log)
+            Checked {
+                diagnostics,
+                log,
+                sizes: (
+                    checker.symbol_count,
+                    checker.type_count,
+                    checker.total_instantiation_count,
+                ),
+                counts: checker.infer_memo.counts,
+            }
         });
         drop(scope);
         crate::program::release_program(program);
         result
     }
 
+    /// The `GOPORT_INFERMEMO_IGNORE` bits of `names`.
+    fn ignore_bits(names: &[&str]) -> u32 {
+        names.iter().fold(0, |bits, name| {
+            let i = RULE_NAMES
+                .iter()
+                .chain(PURGE_NAMES.iter())
+                .chain([IIFE_SCOPE_NAME].iter())
+                .position(|r| r == name)
+                .unwrap_or_else(|| panic!("no rule {name}"));
+            bits | 1 << i
+        })
+    }
+
     /// Checks `source` off, on and in verify mode, and once more on with
-    /// `rule` not applied. Asserts that on and verify give the diagnostics of
+    /// `rule` (and the rules `also_ignored`) not applied. Asserts that on and verify give the diagnostics of
     /// off, which has the `codes` of Go (tsgo at pin 673a5f17d713), that the
     /// walk `walk` broke `rule`, that no walk with its key hit before a later
     /// one was stored, and, when `unguarded_differs`, that a hit without the
@@ -963,14 +1260,17 @@ mod tests {
         rule: Rule,
         walk: (&str, &str),
         unguarded_differs: bool,
+        also_ignored: &[&str],
     ) {
         let bit = 1 << rule as u32;
-        let (off, _) = check_with_memo(&format!("{label}off"), source, InferMemoMode::Off, 0);
+        let off =
+            check_with_memo(&format!("{label}off"), source, InferMemoMode::Off, 0).diagnostics;
         assert_eq!(off.iter().map(|d| d.0).collect::<Vec<_>>(), codes);
-        let (on, log) = check_with_memo(&format!("{label}on"), source, InferMemoMode::On, 0);
-        assert_eq!(on, off);
-        let (verified, _) =
-            check_with_memo(&format!("{label}vfy"), source, InferMemoMode::Verify, 0);
+        let on = check_with_memo(&format!("{label}on"), source, InferMemoMode::On, 0);
+        assert_eq!(on.diagnostics, off);
+        let log = on.log;
+        let verified =
+            check_with_memo(&format!("{label}vfy"), source, InferMemoMode::Verify, 0).diagnostics;
         assert_eq!(verified, off);
         let events: Vec<MemoEvent> = log
             .iter()
@@ -990,10 +1290,186 @@ mod tests {
             "{walk:?} hit an entry of a walk that broke {rule:?}: {events:?}"
         );
         if unguarded_differs {
-            let (unguarded, _) =
-                check_with_memo(&format!("{label}ign"), source, InferMemoMode::On, bit);
+            let ignored = bit | ignore_bits(also_ignored);
+            let unguarded =
+                check_with_memo(&format!("{label}ign"), source, InferMemoMode::On, ignored)
+                    .diagnostics;
             assert_ne!(unguarded, off, "{rule:?} changes nothing here");
         }
+    }
+
+    /// Round b (go-model.md 15.6): checks `source` off, on and in verify
+    /// mode, and on once more with the rule `ignored` (a name of
+    /// `GOPORT_INFERMEMO_IGNORE`) switched off. Asserts that off has the
+    /// `codes` of Go (tsgo at pin 673a5f17d713), that on and verify give the
+    /// diagnostics and counts of off, that the rule acted (the counter
+    /// `fired` is not 0), and, when `unguarded_differs`, that the run without
+    /// the rule gives other diagnostics or counts.
+    fn assert_rule_acts(
+        label: &str,
+        source: &str,
+        codes: &[i32],
+        ignored: &str,
+        fired: &str,
+        unguarded_differs: bool,
+    ) {
+        let off = check_with_memo(&format!("{label}off"), source, InferMemoMode::Off, 0);
+        assert_eq!(
+            off.diagnostics.iter().map(|d| d.0).collect::<Vec<_>>(),
+            codes
+        );
+        let on = check_with_memo(&format!("{label}on"), source, InferMemoMode::On, 0);
+        assert_eq!(on.output(), off.output());
+        assert_ne!(on.count(fired), 0, "{fired} is 0: {:?}", on.log);
+        let verified = check_with_memo(&format!("{label}vfy"), source, InferMemoMode::Verify, 0);
+        assert_eq!(verified.output(), off.output());
+        let bit = ignore_bits(&[ignored]);
+        let unguarded = check_with_memo(&format!("{label}ign"), source, InferMemoMode::On, bit);
+        if unguarded_differs {
+            assert_ne!(
+                unguarded.output(),
+                off.output(),
+                "{ignored} changes nothing here"
+            );
+        }
+    }
+
+    /// b3 (go-model.md 14.1): a walk inside `getBaseTypes(Foo)` reads the
+    /// partial members of `Foo`, which Go resolves again after the body
+    /// (checker.go:19537). Stored, a later walk with its key replays it.
+    #[test]
+    fn base_types_in_progress_is_not_stored() {
+        assert_rule_acts(
+            "b3",
+            "declare function mk2<T, U>(x: { f: { bar: T }; a1: U }): { got: T; u: U };
+declare const otherWrap: { f: { bar: string }; a1: number };
+const pre = mk2(otherWrap);
+interface Foo extends NextI<Foo>, Q { someProp: { test: true } }
+interface BaseI<T> { bar: T }
+interface NextI<C extends { someProp: any }, T = C[\"someProp\"]> extends BaseI<T> { baz: string }
+declare const wrapVal: { f: Foo; a1: number };
+const q = mk2(wrapVal);
+type Q = typeof q;
+const r = mk2(wrapVal);
+const s: { test: true } = r.got;
+",
+            &[2310, 2345],
+            "base_types",
+            "lost_base_types",
+            true,
+        );
+    }
+
+    /// C-A of the round 3 check: `getReducedType(A & B)` sets
+    /// `IsNeverIntersectionComputed` before it tests the properties
+    /// (checker.go:22189-22193), so a walk inside reads `A & B` where Go's
+    /// later walk reads `never`. The counter belongs in `checker_p24.rs`, an
+    /// int52 file.
+    #[test]
+    #[ignore = "needs the getReducedType early-flag counter in checker_p24.rs (after the int52 rebase)"]
+    fn reduction_in_progress_is_not_stored() {
+        assert_rule_acts(
+            "ca",
+            r#"declare function g<T>(x: { w: T }): [T, "a"];
+declare const x: A & B;
+const top1 = g(x);
+const va = g(x);
+const again = g(x);
+const n: number = again[0];
+type A = { w: string; kind: (typeof va)[1] };
+type B = { kind: "b" };
+"#,
+            &[2322],
+            "early_flags",
+            "lost_early_flags",
+            true,
+        );
+    }
+
+    /// C-B of the round 3 check: `IsEmptyAnonymousObjectType` peeks at
+    /// `typeof N` before its members are resolved (checker.go:26941). The
+    /// walk of `a` keeps `typeof N` in `T`; after `N.toString()` Go's walk
+    /// drops it.
+    #[test]
+    fn peek_of_unresolved_members_is_not_stored() {
+        assert_rule_acts(
+            "cb",
+            "namespace N { const h = 1; }
+interface Z { z: 1 }
+declare const t: typeof N & Z;
+declare function mk<T>(x: { p: T & string }): T;
+declare const w: { p: string & typeof N & Z };
+const a = mk(w);
+N.toString();
+const b = mk(w);
+const c: number = b;
+",
+            &[2322],
+            "peek_taint",
+            "lost_peek_taint",
+            true,
+        );
+    }
+
+    /// P4 (go-model.md 14.2 K5): `getDeclaredTypeOfEnum(E)` runs again
+    /// inside the check of `f(E.A)` and stores the enum types first
+    /// (checker.go:24356, :24372); the outer call stores them again. Here no
+    /// walk reads the inner value, so the output does not change without
+    /// the purge.
+    #[test]
+    fn enum_reentry_purges() {
+        assert_rule_acts(
+            "p4enum",
+            "declare function f<T>(x: T): T extends number ? 2 : 3;
+declare function g<T>(x: T): T extends 2 ? 4 : 5;
+declare function k<T>(x: { e: T }): T;
+enum E { A = 1, B = f(E.A), C = g(E.B) }
+const v1 = k({ e: E.B });
+const v2 = k({ e: E.B });
+const n: string = v2;
+",
+            &[2322],
+            "purge_lazy_store",
+            "purge_lazy_store",
+            false,
+        );
+    }
+
+    /// R0b: the type of the IIFE parameter `p` is the type of its argument,
+    /// checked while the resolved signature of the IIFE is `anySignature`
+    /// (checker.go:29954-29966). The walks of `id(...)` there are not keyed.
+    #[test]
+    fn iife_override_is_not_keyed() {
+        assert_rule_acts(
+            "r0b",
+            "declare function id<T>(x: { v: T }): T;
+const r = ((p) => p)(id({ v: 1 }));
+const r2 = ((p) => p)(id({ v: 1 }));
+const s: string = r2;
+",
+            &[2322],
+            "iife_scope",
+            "iife_scoped",
+            false,
+        );
+    }
+
+    /// R5: a walk inside `checkComputedPropertyName` runs while the name's
+    /// links hold `circularConstraintType` (checker.go:27267-27275).
+    #[test]
+    fn computed_name_in_progress_is_not_stored() {
+        assert_rule_acts(
+            "r5cn",
+            r#"declare function key<T extends string>(x: { k: T }): T;
+const o = { [key({ k: "a" })]: 1, [key({ k: "b" })]: 2 };
+class C { [key({ k: "c" })] = 1; }
+const s: string = key({ k: "a" });
+"#,
+            &[1166],
+            "computed_name",
+            "lost_computed_name",
+            false,
+        );
     }
 
     /// C1 (go-model.md 13): a walk inside the body check of a predicate
@@ -1019,6 +1495,7 @@ isStr2(0, g(obj));
                 "{ f: (x: unknown) => x is T; }",
             ),
             true,
+            &[],
         );
     }
 
@@ -1040,6 +1517,9 @@ declare function k<T, K extends string>(v: { [P in K]: T | typeof obj2.x }[K]): 
             Rule::Simplify,
             (r#""hello""#, "{ [P in K]: number | T; }[K]"),
             true,
+            // Round b: the P4 purge at the store of `typeof obj2.x` also
+            // drops the entry.
+            &["purge_lazy_store"],
         );
     }
 
@@ -1070,6 +1550,7 @@ codec("s", 1, {
                 "{ decode: (value: A, payload: P<A>) => B; encode: (value: B, payload: P<B>) => A; }",
             ),
             false,
+            &[],
         );
     }
 }

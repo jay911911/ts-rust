@@ -475,9 +475,15 @@ impl Checker {
             if t.is_nil() {
                 t = self.error_type;
             }
-            self.jsx_element_links
-                .get(node)
-                .resolved_jsx_element_attributes_type = t;
+            let prev_slot = std::mem::replace(
+                &mut self
+                    .jsx_element_links
+                    .get(node)
+                    .resolved_jsx_element_attributes_type,
+                t,
+            );
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != t);
             return t;
         }
         if jsx_flags.intersects(JsxFlags::INTRINSIC_INDEXED_ELEMENT) {
@@ -488,16 +494,28 @@ impl Checker {
             );
             if index_info.is_some() {
                 let value_type = self.index_info(index_info).value_type;
-                self.jsx_element_links
-                    .get(node)
-                    .resolved_jsx_element_attributes_type = value_type;
+                let prev_slot = std::mem::replace(
+                    &mut self
+                        .jsx_element_links
+                        .get(node)
+                        .resolved_jsx_element_attributes_type,
+                    value_type,
+                );
+                self.infer_memo
+                    .lazy_store(prev_slot.is_some() && prev_slot != value_type);
                 return value_type;
             }
         }
         let error_type = self.error_type;
-        self.jsx_element_links
-            .get(node)
-            .resolved_jsx_element_attributes_type = error_type;
+        let prev_slot = std::mem::replace(
+            &mut self
+                .jsx_element_links
+                .get(node)
+                .resolved_jsx_element_attributes_type,
+            error_type,
+        );
+        self.infer_memo
+            .lazy_store(prev_slot.is_some() && prev_slot != error_type);
         error_type
     }
 
@@ -522,7 +540,12 @@ impl Checker {
             let intrinsic_prop = self.get_property_of_type(intrinsic_elements_type, prop_name);
             if intrinsic_prop.is_some() {
                 self.jsx_element_links.get(node).jsx_flags |= JsxFlags::INTRINSIC_NAMED_ELEMENT;
-                self.symbol_node_links.get(node).resolved_symbol = intrinsic_prop;
+                let prev_slot = std::mem::replace(
+                    &mut self.symbol_node_links.get(node).resolved_symbol,
+                    intrinsic_prop,
+                );
+                self.infer_memo
+                    .lazy_store(prev_slot.is_some() && prev_slot != intrinsic_prop);
                 return intrinsic_prop;
             }
             // Intrinsic string indexer case
@@ -531,7 +554,12 @@ impl Checker {
                 self.get_applicable_index_symbol(intrinsic_elements_type, prop_name_type);
             if index_symbol.is_some() {
                 self.jsx_element_links.get(node).jsx_flags |= JsxFlags::INTRINSIC_INDEXED_ELEMENT;
-                self.symbol_node_links.get(node).resolved_symbol = index_symbol;
+                let prev_slot = std::mem::replace(
+                    &mut self.symbol_node_links.get(node).resolved_symbol,
+                    index_symbol,
+                );
+                self.infer_memo
+                    .lazy_store(prev_slot.is_some() && prev_slot != index_symbol);
                 return index_symbol;
             }
             if self
@@ -540,7 +568,10 @@ impl Checker {
             {
                 self.jsx_element_links.get(node).jsx_flags |= JsxFlags::INTRINSIC_INDEXED_ELEMENT;
                 let s = self.ty(intrinsic_elements_type).symbol;
-                self.symbol_node_links.get(node).resolved_symbol = s;
+                let prev_slot =
+                    std::mem::replace(&mut self.symbol_node_links.get(node).resolved_symbol, s);
+                self.infer_memo
+                    .lazy_store(prev_slot.is_some() && prev_slot != s);
                 return s;
             }
             // Wasn't found
@@ -550,7 +581,12 @@ impl Checker {
                 args![tag_name.text(), "JSX.IntrinsicElements"],
             );
             let unknown_symbol = self.unknown_symbol;
-            self.symbol_node_links.get(node).resolved_symbol = unknown_symbol;
+            let prev_slot = std::mem::replace(
+                &mut self.symbol_node_links.get(node).resolved_symbol,
+                unknown_symbol,
+            );
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != unknown_symbol);
             return unknown_symbol;
         }
         if self.no_implicit_any {
@@ -561,7 +597,12 @@ impl Checker {
             );
         }
         let unknown_symbol = self.unknown_symbol;
-        self.symbol_node_links.get(node).resolved_symbol = unknown_symbol;
+        let prev_slot = std::mem::replace(
+            &mut self.symbol_node_links.get(node).resolved_symbol,
+            unknown_symbol,
+        );
+        self.infer_memo
+            .lazy_store(prev_slot.is_some() && prev_slot != unknown_symbol);
         unknown_symbol
     }
 

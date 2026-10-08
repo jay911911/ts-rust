@@ -122,7 +122,13 @@ impl Checker {
                 }
             }
             let list: SharedList<TypeId> = type_parameters.into();
-            self.type_node_links.get(declaration).outer_type_parameters = Some(list.clone());
+            let prev_slot = std::mem::replace(
+                &mut self.type_node_links.get(declaration).outer_type_parameters,
+                Some(list.clone()),
+            );
+            // infmemo1 (P4, Go :22768).
+            self.infer_memo
+                .lazy_store(prev_slot.is_some_and(|prev| prev[..] != list[..]));
             list
         };
         if outer_type_parameters.is_empty() {
@@ -210,7 +216,9 @@ impl Checker {
             } else {
                 result = self.instantiate_anonymous_type(target, new_mapper, new_alias);
             }
-            self.object_instantiations_mut(target).insert(key, result);
+            let prev_slot = self.object_instantiations_mut(target).insert(key, result);
+            self.infer_memo
+                .lazy_store(prev_slot.is_some_and(|prev| prev != result));
             if self
                 .ty(result)
                 .flags
@@ -493,10 +501,14 @@ impl Checker {
                     result =
                         self.get_conditional_type(root.clone(), new_mapper, for_constraint, alias);
                 }
-                root.borrow_mut()
+                let prev_slot = root
+                    .borrow_mut()
                     .instantiations
                     .get_or_insert_with(InstantiationMap::default)
                     .insert(key, result);
+                // infmemo1 (P4, Go :22931).
+                self.infer_memo
+                    .lazy_store(prev_slot.is_some_and(|prev| prev != result));
             }
             return result;
         }
@@ -774,7 +786,12 @@ impl Checker {
             let declaration = self.ty(t).as_mapped_type().declaration;
             let symbol = self.get_symbol_of_declaration(declaration.type_parameter());
             let type_parameter = self.get_declared_type_of_type_parameter(symbol);
-            self.ty_mut(t).as_mapped_type_mut().type_parameter = type_parameter;
+            let prev_slot = std::mem::replace(
+                &mut self.ty_mut(t).as_mapped_type_mut().type_parameter,
+                type_parameter,
+            );
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != type_parameter);
         }
         self.ty(t).as_mapped_type().type_parameter
     }
@@ -789,7 +806,12 @@ impl Checker {
             } else {
                 self.error_type
             };
-            self.ty_mut(t).as_mapped_type_mut().constraint_type = constraint_type;
+            let prev_slot = std::mem::replace(
+                &mut self.ty_mut(t).as_mapped_type_mut().constraint_type,
+                constraint_type,
+            );
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != constraint_type);
         }
         self.ty(t).as_mapped_type().constraint_type
     }
@@ -804,7 +826,12 @@ impl Checker {
             let type_from_node = self.get_type_from_type_node(declaration.name_type());
             let mapper = self.ty(t).as_mapped_type().object.mapper;
             let name_type = self.instantiate_type(type_from_node, mapper);
-            self.ty_mut(t).as_mapped_type_mut().name_type = name_type;
+            let prev_slot = std::mem::replace(
+                &mut self.ty_mut(t).as_mapped_type_mut().name_type,
+                name_type,
+            );
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != name_type);
         }
         self.ty(t).as_mapped_type().name_type
     }
@@ -825,7 +852,12 @@ impl Checker {
             } else {
                 self.error_type
             };
-            self.ty_mut(t).as_mapped_type_mut().template_type = template_type;
+            let prev_slot = std::mem::replace(
+                &mut self.ty_mut(t).as_mapped_type_mut().template_type,
+                template_type,
+            );
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != template_type);
         }
         self.ty(t).as_mapped_type().template_type
     }
@@ -1124,7 +1156,9 @@ impl Checker {
     pub fn get_type_from_this_type_node(&mut self, node: Node) -> TypeId {
         if self.type_node_links.get(node).resolved_type.is_nil() {
             let t = self.get_this_type(node);
-            self.type_node_links.get(node).resolved_type = t;
+            let prev_slot = std::mem::replace(&mut self.type_node_links.get(node).resolved_type, t);
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != t);
         }
         self.type_node_links.get(node).resolved_type
     }
@@ -1170,7 +1204,10 @@ impl Checker {
         if self.type_node_links.get(node).resolved_type.is_nil() {
             let t = self.check_expression(node.literal());
             let resolved = self.get_regular_type_of_literal_type(t);
-            self.type_node_links.get(node).resolved_type = resolved;
+            let prev_slot =
+                std::mem::replace(&mut self.type_node_links.get(node).resolved_type, resolved);
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != resolved);
         }
         self.type_node_links.get(node).resolved_type
     }
@@ -1194,7 +1231,10 @@ impl Checker {
                 self.ty_mut(t).alias = alias;
                 t
             };
-            self.type_node_links.get(node).resolved_type = resolved;
+            let prev_slot =
+                std::mem::replace(&mut self.type_node_links.get(node).resolved_type, resolved);
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != resolved);
         }
         self.type_node_links.get(node).resolved_type
     }
@@ -1212,7 +1252,10 @@ impl Checker {
                 node,
                 potential_alias,
             );
-            self.type_node_links.get(node).resolved_type = resolved;
+            let prev_slot =
+                std::mem::replace(&mut self.type_node_links.get(node).resolved_type, resolved);
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != resolved);
         }
         self.type_node_links.get(node).resolved_type
     }
@@ -1238,7 +1281,10 @@ impl Checker {
                 SyntaxKind::ReadonlyKeyword => self.get_type_from_type_node(arg_type),
                 _ => panic!("Unhandled case in getTypeFromTypeOperatorNode"),
             };
-            self.type_node_links.get(node).resolved_type = resolved;
+            let prev_slot =
+                std::mem::replace(&mut self.type_node_links.get(node).resolved_type, resolved);
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != resolved);
         }
         self.type_node_links.get(node).resolved_type
     }
@@ -1291,7 +1337,10 @@ impl Checker {
                         self.get_distributed_type_parameter(node, t)
                     }
                 };
-            self.type_node_links.get(node).resolved_type = resolved;
+            let prev_slot =
+                std::mem::replace(&mut self.type_node_links.get(node).resolved_type, resolved);
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != resolved);
             return resolved;
         }
         cached
@@ -1432,7 +1481,12 @@ impl Checker {
                 SymbolFlags::TYPE,
                 false, /*ignoreErrors*/
             );
-            self.symbol_node_links.get(node).resolved_symbol = resolved;
+            let prev_slot = std::mem::replace(
+                &mut self.symbol_node_links.get(node).resolved_symbol,
+                resolved,
+            );
+            self.infer_memo
+                .lazy_store(prev_slot.is_some() && prev_slot != resolved);
         }
         self.symbol_node_links.get(node).resolved_symbol
     }
