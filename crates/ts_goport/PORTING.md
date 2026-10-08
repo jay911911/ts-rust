@@ -620,9 +620,14 @@ The batch that adds it is not accepted until Theo approves.
   (`program::release_program_in_background`). So the pools of up to 4
   started projects work at the same time, like Go's goroutines. A
   project's emit starts behind its check when `Program::start_emit`
-  allows it, and its writes wait in a buffer
-  (`buffer_early_emit_writes`) until the task finishes, so the projects
-  still write in build order. A project's emit runs on its own checker
+  allows it (a `noEmitOnError` project's emit starts when its check has
+  ended, `Program::start_emit_after_check`), and its writes wait in a
+  buffer (`buffer_early_emit_writes`) until the task finishes. The tasks
+  finish in Go time order: the orchestrator takes out the time that each
+  task's steps waited on the one loading thread (`GoClock` in
+  `execute/build/orchestrator.rs`), so a task writes when its own emit
+  ends in Go time, or in build order when the outputs of the tasks
+  overlap. A project's emit runs on its own checker
   threads and its own emit pool
   (see Threads): the emit resolver needs the file's checker, which lives
   on its worker thread, and synthetic nodes are thread-local

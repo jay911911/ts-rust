@@ -23,10 +23,16 @@
 //! started tasks work at the same time, as the Go goroutines do. Each
 //! checker emits when its check ends (a task that checks nothing, as with
 //! cached semantic diagnostics, `noCheck` or a syntax error, emits at
-//! once), and the emit keeps its writes in
+//! once; a `noEmitOnError` task emits when its whole check has ended,
+//! `BuildTask::start_emit_after_check`), and the emit keeps its writes in
 //! memory. The started tasks write their outputs one at a time
-//! (`build_project_finish`), in the order their check and emit end, as each
-//! Go builder writes when its own task ends. PORT (determinism): when tasks
+//! (`build_project_finish`), when their check and emit have ended, as each
+//! Go builder writes when its own task ends. The loop runs the steps of the
+//! tasks (take, start, finish) in Go time order (`GoClock`): a task's
+//! steps here wait for the steps of other tasks on this one thread, and
+//! the clock takes that wait out. So a task that reads the outputs of
+//! another task without a reference to it loads before or after those
+//! writes as in Go. PORT (determinism): when tasks
 //! can see each other's writes (shared_outputs.rs), all tasks finish in
 //! build order instead. Tasks start before a started task writes, so a task
 //! that runs beside others in Go reads the file system before they write
@@ -73,7 +79,7 @@ use crate::gostd::Context;
 use crate::execute::tsc::compile::CommandLineTesting;
 use std::collections::VecDeque;
 use std::sync::{Arc, PoisonError};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 // Go: build/orchestrator.go:27 Options
 pub struct Options {
@@ -895,6 +901,17 @@ impl Orchestrator {
             Compiling,
             Done,
         }
+        /// A step of the loop on one task.
+        #[derive(Clone, Copy)]
+        enum Event {
+            /// A free builder takes the next task in order.
+            Take,
+            /// A taken task whose upstream tasks are done starts.
+            Start,
+            /// A compiled task finishes, or starts its emit
+            /// (`BuildTask::start_emit_after_check`).
+            Finish,
+        }
         let num_routines = self.num_routines();
         if num_routines <= 0 {
             return;
@@ -922,127 +939,195 @@ impl Orchestrator {
         // holds the compiling tasks whose signals have all arrived, in the
         // order their last signal arrived: the order in which their checks
         // and emits ended.
-        let (ready, ready_calls) = std::sync::mpsc::channel::<usize>();
+        let (ready, ready_calls) = std::sync::mpsc::channel::<(usize, Instant)>();
         let mut signals = vec![0usize; paths.len()];
         let mut compiled = VecDeque::new();
-        fn signal_arrived(signals: &mut [usize], compiled: &mut VecDeque<usize>, index: usize) {
-            signals[index] -= 1;
-            if signals[index] == 0 {
-                compiled.push_back(index);
-            }
-        }
+        let mut clock = GoClock::new(paths.len(), num_routines);
         // PORT: not in Go (determinism). True when the tasks can see each
         // other's writes (`outputs_overlap`), so they finish in build order.
         // It is found when the first task compiles: until then every task
         // was done when it started. With one builder the order is the same.
         let mut in_build_order = false;
         let mut overlap_checked = false;
-        // Tasks taken (Go `currentTaskIndex`), taken and not built, and
-        // reported. The tasks before `next_report` are built.
+        // The Go clock (see `GoClock`). Not in tests, which finish each
+        // task when it starts; not with one builder or `--clean`, where the
+        // order is the build order; and not when the tasks finish in build
+        // order.
+        let clock_enabled = !testing && !clean && num_routines > 1 && go_clock_enabled();
+        // Tasks taken (Go `currentTaskIndex`) and reported. The tasks before
+        // `next_report` are built.
         let mut next_take = 0;
-        let mut in_flight = 0;
         let mut next_report = 0;
-        while next_report < paths.len() {
-            // Each free builder takes the next task in order.
-            while in_flight < num_routines && next_take < paths.len() {
-                states[next_take] = State::Waiting;
-                next_take += 1;
-                in_flight += 1;
-            }
-            // A taken task starts once its upstream tasks are done
-            // (Go `waitOnUpstream`; `cleanProject` does not wait). A task
-            // that compiles makes its program now. A built task frees its
-            // builder (Go `close(task.built)`).
-            let mut progressed = false;
-            for index in next_report..next_take {
-                if states[index] != State::Waiting {
-                    continue;
-                }
-                let task = self.get_task(&paths[index]);
-                if !clean {
-                    let upstream_done = task.borrow().up_stream.iter().all(|upstream| {
-                        let path = self.to_path(&upstream.task.borrow().config);
-                        index_of
-                            .get(&path)
-                            .is_none_or(|&i| states[i] == State::Done)
-                    });
-                    if !upstream_done {
-                        continue;
-                    }
-                }
-                let mut task = task.borrow_mut();
-                task.result = Some(TaskResult::new(
-                    self.create_task_builder_status_reporter(),
-                    self.create_task_diagnostic_reporter(),
-                ));
-                states[index] = if clean {
-                    task.clean_project(self, &paths[index]);
-                    State::Done
-                } else if !task.build_project_start(self, &paths[index]) {
-                    State::Done
-                } else if testing {
-                    task.build_project_finish(self, &paths[index]);
-                    State::Done
-                } else {
-                    signals[index] = task.notify_when_compiled(|| ReadySignal {
-                        index,
-                        ready: ready.clone(),
-                    });
-                    if signals[index] == 0 {
-                        compiled.push_back(index);
-                    }
-                    State::Compiling
-                };
-                if states[index] == State::Done {
-                    self.task_built(&mut task);
-                    in_flight -= 1;
-                    progressed = true;
-                }
-                drop(task);
-                if states[index] == State::Compiling && !overlap_checked && num_routines > 1 {
-                    overlap_checked = true;
-                    in_build_order = self.outputs_overlap(&paths);
-                }
+        loop {
+            while let Ok((index, at)) = ready_calls.try_recv() {
+                clock.signal_arrived(&mut signals, &mut compiled, index, at);
             }
             // Tasks report in order, each when it is built.
             while next_report < paths.len() && states[next_report] == State::Done {
                 let task = self.get_task(&paths[next_report]);
                 self.report_task(&mut task.borrow_mut(), build_result);
                 next_report += 1;
-                progressed = true;
             }
-            if progressed {
-                continue;
+            if next_report == paths.len() {
+                break;
             }
-            // No task can start or report, so a taken task compiles (the
-            // first task that is not built, `next_report`, has its upstream
-            // tasks done). A Go builder writes the outputs of its task
-            // when the task's check ends, and then takes the next task. So
-            // the task whose started check and emit ended first finishes
-            // now: it writes its outputs, and its builder takes the next
-            // task. When the outputs overlap, only the first task that is not
-            // built finishes, as in Go when the tasks end in build order.
-            // When no task can finish yet, this waits for a signal, and frees
-            // a kept released program first.
-            let index = loop {
-                while let Ok(index) = ready_calls.try_recv() {
-                    signal_arrived(&mut signals, &mut compiled, index);
-                }
-                let can_finish = |&index: &usize| !in_build_order || index == next_report;
-                if let Some(at) = compiled.iter().position(can_finish) {
-                    break compiled.remove(at).expect("the position is in the queue");
-                }
-                if !self.free_released() {
-                    let index = ready_calls.recv().expect("this thread keeps a sender");
-                    signal_arrived(&mut signals, &mut compiled, index);
+            // The next event and its Go time. With the Go clock, the event
+            // with the smallest Go time, in build order on a tie. Without
+            // it, every take and start first, in build order, then the
+            // first compiled task that can finish: a Go builder writes the
+            // outputs of its task when the task's check and emit end, and
+            // then takes the next task. When the outputs overlap, only the
+            // first task that is not built finishes, as in Go when the tasks
+            // end in build order.
+            let go_clock = clock_enabled && !in_build_order;
+            let mut next: Option<(Duration, usize, Event)> = None;
+            let mut consider = |time: Duration, index: usize, event: Event| {
+                if next.is_none_or(|(next_time, next_index, _)| {
+                    (time, index) < (next_time, next_index)
+                }) {
+                    next = Some((time, index, event));
                 }
             };
-            let task = self.get_task(&paths[index]);
-            let mut task = task.borrow_mut();
-            task.build_project_finish(self, &paths[index]);
-            states[index] = State::Done;
-            self.task_built(&mut task);
-            in_flight -= 1;
+            if next_take < paths.len()
+                && let Some(time) = clock.first_free()
+            {
+                consider(
+                    if go_clock { time } else { Duration::ZERO },
+                    next_take,
+                    Event::Take,
+                );
+            }
+            // A taken task starts once its upstream tasks are done
+            // (Go `waitOnUpstream`; `cleanProject` does not wait).
+            for index in next_report..next_take {
+                if states[index] != State::Waiting {
+                    continue;
+                }
+                let mut time = clock.taken[index];
+                let mut upstream_done = true;
+                if !clean {
+                    for upstream in &self.get_task(&paths[index]).borrow().up_stream {
+                        let path = self.to_path(&upstream.task.borrow().config);
+                        if let Some(&upstream) = index_of.get(&path) {
+                            upstream_done &= states[upstream] == State::Done;
+                            time = time.max(clock.done[upstream]);
+                        }
+                    }
+                }
+                if upstream_done {
+                    consider(
+                        if go_clock { time } else { Duration::ZERO },
+                        index,
+                        Event::Start,
+                    );
+                }
+            }
+            let can_finish = |index: usize| !in_build_order || index == next_report;
+            if go_clock {
+                for &index in compiled.iter().filter(|&&index| can_finish(index)) {
+                    consider(clock.end[index], index, Event::Finish);
+                }
+            } else if let Some(&index) = compiled.iter().find(|&&index| can_finish(index)) {
+                consider(Duration::MAX, index, Event::Finish);
+            }
+            // No task can start or finish yet (the first task that is not
+            // built has its upstream tasks done, so it compiles), or with
+            // the Go clock, a compiling task could still end before the
+            // next event: wait for a signal, and free a kept released
+            // program first.
+            let wait = match next {
+                None => Some(None),
+                Some((time, ..)) if go_clock => clock
+                    .lag(time, |index| {
+                        states[index] == State::Compiling && signals[index] > 0
+                    })
+                    .map(Some),
+                Some(_) => None,
+            };
+            if let Some(timeout) = wait {
+                if !self.free_released() {
+                    let arrived = match timeout {
+                        None => Some(ready_calls.recv().expect("this thread keeps a sender")),
+                        Some(timeout) => ready_calls.recv_timeout(timeout).ok(),
+                    };
+                    if let Some((index, at)) = arrived {
+                        clock.signal_arrived(&mut signals, &mut compiled, index, at);
+                    }
+                }
+                continue;
+            }
+            let (time, index, event) = next.expect("an event when there is no wait");
+            // The task waits for the check and emit that it started; with
+            // none, it is compiled now.
+            let arm = |task: &BuildTask,
+                       signals: &mut [usize],
+                       compiled: &mut VecDeque<usize>,
+                       clock: &mut GoClock| {
+                signals[index] = task.notify_when_compiled(|| ReadySignal {
+                    index,
+                    ready: ready.clone(),
+                });
+                clock.armed(index, signals[index] == 0);
+                if signals[index] == 0 {
+                    compiled.push_back(index);
+                }
+            };
+            match event {
+                Event::Take => {
+                    clock.take(index);
+                    states[index] = State::Waiting;
+                    next_take += 1;
+                }
+                // A task that compiles makes its program now. A built task
+                // frees its builder (Go `close(task.built)`).
+                Event::Start => {
+                    clock.step(index, time);
+                    let task = self.get_task(&paths[index]);
+                    let mut task = task.borrow_mut();
+                    task.result = Some(TaskResult::new(
+                        self.create_task_builder_status_reporter(),
+                        self.create_task_diagnostic_reporter(),
+                    ));
+                    states[index] = if clean {
+                        task.clean_project(self, &paths[index]);
+                        State::Done
+                    } else if !task.build_project_start(self, &paths[index]) {
+                        State::Done
+                    } else if testing {
+                        task.build_project_finish(self, &paths[index]);
+                        State::Done
+                    } else {
+                        arm(&task, &mut signals, &mut compiled, &mut clock);
+                        State::Compiling
+                    };
+                    if states[index] == State::Done {
+                        clock.built(index);
+                        self.task_built(&mut task);
+                    }
+                    drop(task);
+                    if states[index] == State::Compiling && !overlap_checked && num_routines > 1 {
+                        overlap_checked = true;
+                        in_build_order = self.outputs_overlap(&paths);
+                    }
+                }
+                // The task writes its outputs, and its builder takes the
+                // next task. A `noEmitOnError` task first starts its emit,
+                // and finishes when that emit ends.
+                Event::Finish => {
+                    compiled.retain(|&compiled| compiled != index);
+                    clock.step(index, time);
+                    let task = self.get_task(&paths[index]);
+                    let mut task = task.borrow_mut();
+                    if task.start_emit_after_check() {
+                        arm(&task, &mut signals, &mut compiled, &mut clock);
+                        continue;
+                    }
+                    task.build_project_finish(self, &paths[index]);
+                    states[index] = State::Done;
+                    clock.built(index);
+                    self.task_built(&mut task);
+                }
+            }
         }
         // The kept released programs free now, unless the process ends
         // after this build (`start_exported`).
@@ -1410,17 +1495,150 @@ struct BuildInfoPrefetch {
 /// The most released programs that `Orchestrator::released` keeps.
 const MAX_KEPT_RELEASED: usize = 4;
 
-/// PORT: not in Go (perf). Sends the build order index of its task when it
-/// drops (see `build_all_tasks`).
+/// PORT: not in Go (perf). Sends the build order index of its task and the
+/// time when it drops (see `build_all_tasks`).
 struct ReadySignal {
     index: usize,
-    ready: std::sync::mpsc::Sender<usize>,
+    ready: std::sync::mpsc::Sender<(usize, Instant)>,
 }
 
 impl Drop for ReadySignal {
     fn drop(&mut self) {
-        let _ = self.ready.send(self.index);
+        let _ = self.ready.send((self.index, Instant::now()));
     }
+}
+
+/// PORT: not in Go. The Go time of the events of `build_all_tasks`.
+///
+/// A Go builder runs its task on its own goroutine: the load, the check,
+/// the emit and the writes. Here one thread makes every program, one after
+/// another, and starts and finishes every task (`build_project_start`,
+/// `BuildTask::start_emit_after_check`, `build_project_finish`); only the
+/// check and the emit run on the program's own threads. So a step of a task
+/// can come later here than on its own goroutine: it waits for the steps of
+/// other tasks that came first. The clock takes that wait out. At each
+/// step of a task, the task's delay is the time here minus the Go time of
+/// the step, and the later times of the task count from there: its check
+/// and emit end at the time of its last `ReadySignal` minus its delay, and
+/// it is built at the end of its finish minus its delay. A free builder
+/// takes the next task in order at the Go time its last task was built (Go
+/// `currentTaskIndex`), and a task starts at the Go time it was taken or
+/// the last of its upstream tasks was built, if that is later.
+///
+/// `build_all_tasks` runs the events in Go time order. Before an event at
+/// Go time T, each compiling task whose check and emit have not ended must
+/// be past T on its own clock (`lag`), so it cannot end before T. So when a
+/// task loads at T, every write before T in Go time is on the file system,
+/// and no write after T is: a task that reads the outputs of another task
+/// without a reference to it (README K2) reads what the Go task reads with
+/// the same task times. `GOPORT_BUILD_GO_CLOCK=0` turns the clock off (for
+/// A/B timing): then a free builder takes and starts tasks at once, and the
+/// tasks finish in the order their signals arrive.
+struct GoClock {
+    /// The start of the loop. Times here count from it.
+    origin: Instant,
+    /// The Go times at which the free builders became free.
+    free: Vec<Duration>,
+    /// Per task: the Go time when a builder took it.
+    taken: Vec<Duration>,
+    /// Per task: the time here minus the Go time, at its last step.
+    delay: Vec<Duration>,
+    /// Per task: the time of the last signal of its barrier so far.
+    last_signal: Vec<Option<Instant>>,
+    /// Per compiled task: the Go time when its check and emit ended.
+    end: Vec<Duration>,
+    /// Per built task: the Go time when it was built.
+    done: Vec<Duration>,
+}
+
+impl GoClock {
+    fn new(tasks: usize, builders: usize) -> Self {
+        GoClock {
+            origin: Instant::now(),
+            free: vec![Duration::ZERO; builders],
+            taken: vec![Duration::ZERO; tasks],
+            delay: vec![Duration::ZERO; tasks],
+            last_signal: vec![None; tasks],
+            end: vec![Duration::ZERO; tasks],
+            done: vec![Duration::ZERO; tasks],
+        }
+    }
+
+    /// The Go time of the instant `at` of task `index`.
+    fn go_time(&self, index: usize, at: Instant) -> Duration {
+        at.saturating_duration_since(self.origin)
+            .saturating_sub(self.delay[index])
+    }
+
+    /// The Go time when the first free builder became free.
+    fn first_free(&self) -> Option<Duration> {
+        self.free.iter().min().copied()
+    }
+
+    /// The first free builder takes task `index`.
+    fn take(&mut self, index: usize) {
+        let first = (0..self.free.len())
+            .min_by_key(|&builder| self.free[builder])
+            .expect("a free builder takes the task");
+        self.taken[index] = self.free.swap_remove(first);
+    }
+
+    /// A step of task `index` at Go time `time` starts now.
+    fn step(&mut self, index: usize, time: Duration) {
+        self.delay[index] = self.origin.elapsed().saturating_sub(time);
+    }
+
+    /// The barrier of task `index` was sent (`notify_when_compiled`).
+    /// `ended` when it has no signal: then its check and emit ended now.
+    fn armed(&mut self, index: usize, ended: bool) {
+        self.last_signal[index] = None;
+        if ended {
+            self.end[index] = self.go_time(index, Instant::now());
+        }
+    }
+
+    /// A signal of task `index` that dropped at `at` arrived. When it was
+    /// the last one, the task is compiled.
+    fn signal_arrived(
+        &mut self,
+        signals: &mut [usize],
+        compiled: &mut VecDeque<usize>,
+        index: usize,
+        at: Instant,
+    ) {
+        signals[index] -= 1;
+        let last = self.last_signal[index].map_or(at, |last| last.max(at));
+        self.last_signal[index] = Some(last);
+        if signals[index] == 0 {
+            self.end[index] = self.go_time(index, last);
+            compiled.push_back(index);
+        }
+    }
+
+    /// Task `index` is built now, and its builder is free.
+    fn built(&mut self, index: usize) {
+        self.done[index] = self.go_time(index, Instant::now());
+        self.free.push(self.done[index]);
+    }
+
+    /// How long to wait before an event at Go time `time`: the most that a
+    /// task for which `waiting` is true (a compiling task whose check and
+    /// emit have not ended) is behind `time` on its own clock. None when no
+    /// such task is behind.
+    fn lag(&self, time: Duration, waiting: impl Fn(usize) -> bool) -> Option<Duration> {
+        let now = self.origin.elapsed();
+        (0..self.delay.len())
+            .filter(|&index| waiting(index))
+            .filter_map(|index| time.checked_sub(now.saturating_sub(self.delay[index])))
+            .filter(|lag| !lag.is_zero())
+            .max()
+    }
+}
+
+/// True unless `GOPORT_BUILD_GO_CLOCK=0` (see `GoClock`).
+fn go_clock_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("GOPORT_BUILD_GO_CLOCK").as_deref() != Ok("0"))
 }
 
 impl BuildInfoPrefetch {
