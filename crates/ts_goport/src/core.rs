@@ -3934,6 +3934,8 @@ type PageTable<V> = Vec<Option<Box<LinkPage<V>>>>;
 // `get` calls it for every new record.
 #[inline(never)]
 fn new_link_record<V: Default>(cell: &mut Option<V>) -> &mut V {
+    // infmemo1 verify branch only (V1, go-model.md 15.5).
+    crate::checker::infer_memo::note_link_record();
     cell.insert(V::default())
 }
 
@@ -4113,7 +4115,14 @@ impl<K: LinkKey, V: Default> LinkStore<K, V> {
     #[cold]
     #[inline(never)]
     fn map_get(&mut self, key: K) -> &mut V {
-        self.map.entry(key).or_default()
+        // infmemo1 verify branch only (V1): count a new record.
+        match self.map.entry(key) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                crate::checker::infer_memo::note_link_record();
+                entry.insert(V::default())
+            }
+        }
     }
 
     /// Go `store.Get(key)` followed by writes to the new record, for a key
