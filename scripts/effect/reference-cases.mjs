@@ -36,10 +36,20 @@ if (!args.ours || !args.ref) {
 fs.mkdirSync(args.out, { recursive: true });
 args.out = fs.realpathSync(args.out);
 
+// Go effecttest DefaultTsConfig (runner.go). It also turns `apiStabilityLeak`
+// off; that key joins when the rule is ported (an unknown rule name adds
+// TS377134 to every case).
 const DEFAULT_TSCONFIG = {
   compilerOptions: {
     skipLibCheck: true,
-    plugins: [{ name: "@effect/language-service", ignoreEffectErrorsInTscExitCode: true, skipDisabledOptimization: true }],
+    plugins: [
+      {
+        name: "@effect/language-service",
+        ignoreEffectErrorsInTscExitCode: true,
+        skipDisabledOptimization: true,
+        diagnosticSeverity: { experimentalApiUsage: "off", unstableApiUsage: "off" },
+      },
+    ],
   },
 };
 

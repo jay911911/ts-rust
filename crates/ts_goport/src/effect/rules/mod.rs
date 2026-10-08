@@ -103,6 +103,7 @@ pub mod schema_sync_in_effect;
 pub mod schema_union_of_literals;
 pub mod scope_in_layer_effect;
 pub mod service_not_as_class;
+pub mod stability_api_usage;
 pub mod strict_boolean_expressions;
 pub mod strict_effect_provide;
 pub mod sync_to_succeed;
@@ -119,6 +120,8 @@ pub mod unsafe_effect_type_assertion;
 
 /// Go `rules.All`.
 pub static ALL: &[&Rule] = &[
+    &stability_api_usage::EXPERIMENTAL_API_USAGE,
+    &stability_api_usage::UNSTABLE_API_USAGE,
     &floating_effect::FLOATING_EFFECT,
     &floating_effect_in_vitest::FLOATING_EFFECT_IN_VITEST,
     &missing_effect_error::MISSING_EFFECT_ERROR,
