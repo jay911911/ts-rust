@@ -453,6 +453,9 @@ impl Checker {
             .get_by_id(&self.symbols, undefined_symbol)
             .resolved_type = undefined_widening_type;
         let arguments_symbol = self.arguments_symbol;
+        // Go reads the links (and gives the id) before the type.
+        self.value_symbol_links
+            .get_by_id(&self.symbols, arguments_symbol);
         let iarguments_type =
             self.get_global_type("IArguments", 0 /*arity*/, true /*reportErrors*/);
         self.value_symbol_links

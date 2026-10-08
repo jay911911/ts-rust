@@ -411,7 +411,7 @@ impl Checker {
                         if is_private_identifier(name) {
                             let t_symbol = self.ty(t).symbol;
                             if t_symbol.is_some() {
-                                let prop_name = get_symbol_name_for_private_identifier(
+                                let prop_name = checker_symbol_name_for_private_identifier(
                                     &self.symbols,
                                     t_symbol,
                                     name.text(),

@@ -291,6 +291,10 @@ impl Checker {
                 check_flags,
             );
             self.sym_mut(inferred_prop).declarations = prop_declarations;
+            // Go reads the left side's links first, so `inferredProp` gets
+            // its id before `prop` (Go evaluates operands left to right).
+            self.value_symbol_links
+                .get_by_id(&self.symbols, inferred_prop);
             let name_type = self
                 .value_symbol_links
                 .get_by_id(&self.symbols, prop)

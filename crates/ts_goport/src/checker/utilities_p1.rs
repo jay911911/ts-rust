@@ -2658,13 +2658,23 @@ type U1 = (A | SvelteProgram) & (B | Box<string>) & ({ p: 1 } | SvelteShorthandA
                     sort_stable_func(&mut list, |&x, &y| c.compare_types(x, y));
                 }
                 let last = crate::ast::next_ids().1;
-                // The id that the sort gave each bare symbol, from 1 in the
-                // order the sort gave them; 0 for none.
+                let given = crate::ast::last_symbol_id();
+                // The rank of the id that the sort gave each bare symbol,
+                // from 1 in the order the sort gave them; 0 for none. Tests
+                // on other threads take ids from the same counter at the
+                // same time, so only the order counts.
                 let ids: Vec<u64> = bare
                     .iter()
-                    .map(|&symbol| {
-                        let id = crate::ast::get_symbol_id(&c.symbols, symbol);
-                        if id <= last { id - first } else { 0 }
+                    .map(|&symbol| crate::ast::get_symbol_id(&c.symbols, symbol))
+                    .map(|id| if id <= given { id } else { 0 })
+                    .collect();
+                let mut ranked: Vec<u64> = ids.iter().copied().filter(|&id| id != 0).collect();
+                ranked.sort_unstable();
+                let ids: Vec<u64> = ids
+                    .iter()
+                    .map(|&id| match ranked.binary_search(&id) {
+                        Ok(rank) if id != 0 => rank as u64 + 1,
+                        _ => 0,
                     })
                     .collect();
                 let order: Vec<usize> = list

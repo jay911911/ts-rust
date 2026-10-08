@@ -9,6 +9,7 @@ mod flag_bytes;
 mod jsdoc_cut;
 mod large_union_order;
 mod never_intersection_order;
+mod private_class_ids;
 mod removed_reference_config;
 mod showconfig;
 mod spelling_memo;

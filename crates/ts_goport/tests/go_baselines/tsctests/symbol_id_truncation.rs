@@ -3,14 +3,16 @@
 //!
 //! Go gives a symbol its id on first use (`ast.GetSymbolId`): each read of
 //! `valueSymbolLinks` (checker/links.go:33) and of a few node builder maps.
-//! The checkers of a pool share one counter, and each `NewChecker` gives 4
-//! checker symbols their ids before the first check
-//! (checker/checker.go:1355 initializeChecker). The property name of a
-//! unique symbol holds its id (`<prefix>@k4@<id>`, checker/checker.go:23402
+//! The checkers of a pool share one process counter, and every
+//! `NewChecker` gives ids (4 here: checker/checker.go:1355
+//! initializeChecker) before the first check (`createCheckers` waits for
+//! all of them). The property name of a unique symbol holds its id
+//! (`<prefix>@k4@<id>`, checker/checker.go:23402
 //! getESSymbolLikeTypeForNode), and the node builder counts the length of
 //! that name toward truncation (checker/nodebuilderimpl.go:2614
 //! addPropertyToElementList). So the digits of the id move where
-//! `... N more ...` starts (`SymbolArenaLinks`, `program::new_pool_checker`).
+//! `... N more ...` starts (`SymbolArenaLinks`, `ast::get_symbol_id`, and
+//! the pool's wait in `program::start_checkers`).
 //!
 //! Here `k4` has id 13 with the 2 checkers of the default pool (8 ids from
 //! `NewChecker`, then `a0` to `a3` and `k4`) and id 9 with `--checkers 1`.

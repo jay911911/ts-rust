@@ -902,7 +902,7 @@ impl Checker {
             && self.sym(source_symbol).flags.intersects(SymbolFlags::CLASS)
         {
             let private_identifier_description = value_declaration.name().text().to_string();
-            let symbol_table_key = get_symbol_name_for_private_identifier(
+            let symbol_table_key = checker_symbol_name_for_private_identifier(
                 &self.symbols,
                 source_symbol,
                 &private_identifier_description,

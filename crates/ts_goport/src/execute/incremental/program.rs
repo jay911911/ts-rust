@@ -508,6 +508,9 @@ impl Program {
             let global_diagnostics = get_global_diagnostics();
             self.started.borrow_mut().global_diagnostics = Some(global_diagnostics);
         }
+        // Go emits after the whole check. The emit gives symbol ids, which
+        // must come after every check's ids, as in Go.
+        crate::program::send_checker_rendezvous();
         let emit = start_emit_files(self, options);
         self.started.borrow_mut().emit = Some(emit);
     }

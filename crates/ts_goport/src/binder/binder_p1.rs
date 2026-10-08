@@ -998,6 +998,9 @@ impl Binder {
 // inside the process. Go binds files in parallel, and each file into its own
 // arena here, so a bind cannot give the Go id. Where Go shows `symbol.Name`
 // outside the process (the API), `go_symbol_name` puts the id back.
+// This gives no id: the binder binds a file arena, and the file's join into
+// the lineage gives its classes their ids (`PreparedFileArena`). A checker
+// calls `checker_symbol_name_for_private_identifier`.
 pub fn get_symbol_name_for_private_identifier(
     symbols: &SymbolArena,
     containing_class_symbol: SymbolId,
@@ -1008,6 +1011,19 @@ pub fn get_symbol_name_for_private_identifier(
         "{}#{}@{}",
         INTERNAL_SYMBOL_NAME_PREFIX, containing_class_symbol.0, description
     )
+}
+
+// Go: binder/binder.go:374 GetSymbolNameForPrivateIdentifier, on a checker
+/// `get_symbol_name_for_private_identifier` after Go's
+/// `ast.GetSymbolId(containingClassSymbol)`, which gives the class its id
+/// when it has none.
+pub fn checker_symbol_name_for_private_identifier(
+    symbols: &SymbolArena,
+    containing_class_symbol: SymbolId,
+    description: &str,
+) -> String {
+    crate::ast::get_symbol_id(symbols, containing_class_symbol);
+    get_symbol_name_for_private_identifier(symbols, containing_class_symbol, description)
 }
 
 /// Rust-only: the text of Go `symbol.Name` for `symbol`, as the API returns

@@ -569,7 +569,7 @@ impl Checker {
         let mut containing_class = get_containing_class_excluding_class_decorators(location);
         while containing_class.is_some() {
             let symbol = containing_class.symbol();
-            let name = get_symbol_name_for_private_identifier(&self.symbols, symbol, prop_name);
+            let name = checker_symbol_name_for_private_identifier(&self.symbols, symbol, prop_name);
             let members = self.sym(symbol).members;
             let prop = self.symbols.get(members, &name);
             if prop.is_some() {

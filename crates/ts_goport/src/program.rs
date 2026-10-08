@@ -1485,12 +1485,12 @@ pub fn try_load_timed(
 /// lsshells M3d: a freeable file version (`ast::FileVersion`) binds into
 /// whole chunks of its own (`add_file`), and the lineage keeps their range.
 /// After the version dies, the next use of the lineage frees those chunks
-/// (`free_dead`): its ids become holes, and a read of one panics. Each
-/// thread then frees its `get_symbol_id` ids of those chunks
-/// (`ast::free_lineage_symbol_ids`). A static file keeps its symbols until
-/// exit. The program copies (`VersionTables::bound_symbols`) and checker
-/// arenas that share a freed chunk keep it until they drop, or until a
-/// checker catches up (`catch_up_checker`).
+/// (`free_dead`): its ids become holes, and a read of one panics. Its
+/// `get_symbol_id` ids go too (`SymbolArena::free_symbol_ids`). A static
+/// file keeps its symbols until exit. The program copies
+/// (`VersionTables::bound_symbols`) and checker arenas that share a freed
+/// chunk keep it until they drop, or until a checker catches up
+/// (`catch_up_checker`).
 ///
 /// apisym1c: each bind and free makes a new generation
 /// (`LINEAGE_GENERATION`, `SymbolArena::lineage_seen`), so a checker can
@@ -1504,7 +1504,7 @@ struct Lineage {
     seen_dead: usize,
     /// The ranges freed so far, in order, for `catch_up_checker`.
     // PERF: one entry per dead file version (32 bytes), as
-    // `ast::free_lineage_symbol_ids` keeps one per edit.
+    // `ast::LineageIdTable::free` keeps one per edit.
     freed: Vec<(ArenaMark, ArenaMark)>,
 }
 
@@ -1548,7 +1548,7 @@ impl Lineage {
             if let Some((start, end, symbols)) = self.freeable.remove(&file) {
                 self.symbols.free_range(start, end);
                 self.freed.push((start, end));
-                crate::ast::free_lineage_symbol_ids(file, symbols);
+                self.symbols.free_symbol_ids(file, symbols);
             }
         }
         if self.freed.len() != freed {
@@ -1613,7 +1613,10 @@ impl Lineage {
             go_file.version().is_some()
         };
         self.add_file(file.file_index(), freeable, |symbols| {
+            let noted = symbols.private_name_count();
             bind_source_file(file, symbols);
+            // Go's binder gives these ids as it binds (binder.go:326).
+            symbols.give_private_class_ids(noted);
         });
     }
 }
@@ -3300,7 +3303,9 @@ fn packages_map(tables: &VersionTables) -> FxHashMap<String, bool> {
 // is made on its own worker thread and stays there. The loading thread
 // sends jobs to the workers and waits for the results, which it merges in
 // file order. Each checker sees only its own files, in file order, so the
-// results match the Go grouping and do not depend on thread timing.
+// results match the Go grouping. As in Go, the checkers share the symbol id
+// counter (`ast::get_symbol_id`), so the digits of late-bound names can
+// depend on thread timing where Go's do.
 // ---------------------------------------------------------------------------
 
 thread_local! {
@@ -3319,8 +3324,8 @@ thread_local! {
 }
 
 /// The thread-local state that a checker worker starts from: the current
-/// program and its tables, and the synthetic nodes, ids and lazy JSDoc of
-/// the loading thread when the pool is made. The language server's
+/// program and its tables, and the synthetic nodes, node ids and lazy JSDoc
+/// of the loading thread when the pool is made. The language server's
 /// cross-project search threads start from it too (`ls/search_thread.rs`).
 /// The thread keeps its copy of the program tables until it ends, so it can
 /// finish its work after the program is released, as a Go goroutine that
@@ -3427,22 +3432,54 @@ fn create_checkers() -> CheckerPool {
     start_checkers(count)
 }
 
-// Go: compiler/checkerpool.go:365 createCheckers (one `checker.NewChecker`)
-/// Makes checker `index` of a pool of `count` on this thread.
-// PORT: Go makes every checker of the pool before the first check, and the
-// checkers share one symbol id counter (`ast.GetSymbolId`). So the first
-// check of each checker comes after the ids that all `NewChecker` calls gave
-// (`initializeChecker` gives 4 checker symbols their ids). A worker here
-// counts its ids on its own (`ast::id_seed`), so it skips the ids that the
-// other checkers' `NewChecker` gave: each makes the same calls. Late-bound
-// names hold symbol ids (`__@iterator@<id>`), and the node builder counts
-// their length toward truncation.
-fn new_pool_checker(index: usize, count: usize) -> Checker {
-    let (_, before) = next_ids();
-    let checker = Checker::new(index);
-    let (_, after) = next_ids();
-    skip_symbol_ids((after - before) * (count as u64 - 1));
-    checker
+/// Checker threads that wait for each other between two phases, as Go's
+/// `WorkGroup.RunAndWait` makes the checkers wait. Each of `count`
+/// arrivals (`Arrival`) arrives when it drops: when its thread ends the
+/// first phase, when that thread panics, or when a job that holds it never
+/// runs. `wait` returns when all have arrived.
+#[cfg(not(target_family = "wasm"))]
+struct Rendezvous {
+    /// The arrivals still to come.
+    left: Mutex<usize>,
+    all: std::sync::Condvar,
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl Rendezvous {
+    fn new(count: usize) -> Arc<Self> {
+        Arc::new(Rendezvous {
+            left: Mutex::new(count),
+            all: std::sync::Condvar::new(),
+        })
+    }
+
+    /// One of the `count` arrivals.
+    fn arrival(self: &Arc<Self>) -> Arrival {
+        Arrival(self.clone())
+    }
+
+    /// Waits until every arrival has arrived.
+    fn wait(&self) {
+        let mut left = self.left.lock().unwrap_or_else(PoisonError::into_inner);
+        while *left > 0 {
+            left = self.all.wait(left).unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+}
+
+/// One arrival at a `Rendezvous`: it arrives when it drops.
+#[cfg(not(target_family = "wasm"))]
+struct Arrival(Arc<Rendezvous>);
+
+#[cfg(not(target_family = "wasm"))]
+impl Drop for Arrival {
+    fn drop(&mut self) {
+        let mut left = self.0.left.lock().unwrap_or_else(PoisonError::into_inner);
+        *left -= 1;
+        if *left == 0 {
+            self.0.all.notify_all();
+        }
+    }
 }
 
 /// Starts `count` checker workers, each on its own thread with its own
@@ -3460,10 +3497,19 @@ fn start_checkers(count: usize) -> CheckerPool {
     } else {
         None
     };
+    // Go `createCheckers` (compiler/checkerpool.go:365) makes every checker
+    // of the pool, then `RunAndWait`, so a check starts only after every
+    // `NewChecker`. The checkers share the symbol id counter
+    // (`ast::get_symbol_id`), and `initializeChecker` gives ids (4 or more),
+    // so every check id comes after every `NewChecker` id, as in Go.
+    // Late-bound names hold symbol ids (`__@iterator@<id>`), and the node
+    // builder counts their length toward truncation.
+    let made = Rendezvous::new(count);
     let (workers, threads): (Vec<_>, Vec<_>) = (0..count)
         .map(|index| {
             let (sender, receiver) = std::sync::mpsc::channel::<Job>();
             let seed = WorkerSeed::take();
+            let (made, arrival) = (made.clone(), made.arrival());
             let thread = crate::core::GoThread::new()
                 .name(format!("checker-{index}"))
                 .stack_size(crate::gostd::stack::max_stack_size())
@@ -3472,7 +3518,12 @@ fn start_checkers(count: usize) -> CheckerPool {
                         set_jemalloc_thread_arena(arena);
                     }
                     seed.install();
-                    let checker = new_pool_checker(index, count);
+                    let checker = {
+                        let _made = arrival;
+                        Checker::new(index)
+                    };
+                    made.wait();
+                    drop(made);
                     WORKER_CHECKER.with(|slot| *slot.borrow_mut() = Some(checker));
                     WORKER_INDEX.with(|slot| slot.set(Some(index)));
                     for job in receiver {
@@ -3509,20 +3560,20 @@ fn start_checkers(count: usize) -> CheckerPool {
     let checkers = (0..count)
         .map(|index| {
             let mut ids = WorkerIds(id_seed().into());
-            let checker = ids.run(|| new_pool_checker(index, count));
+            let checker = ids.run(|| Checker::new(index));
             Some((checker, ids))
         })
         .collect();
     CheckerPool { checkers }
 }
 
-/// wasm: the ids of one checker of the inline pool. A native checker
-/// worker starts from a copy of the loading thread's ids (`WorkerSeed`) and
-/// counts on its own from then on, so the ids that one checker gives do not
-/// move the ids of another (some names hold symbol ids, and members with
-/// no declaration sort by name). The checkers share the loading thread's
-/// synthetic nodes and lazy JSDoc: those keep each node's handle, which
-/// thread-local caches key on.
+/// wasm: the node ids of one checker of the inline pool. A native checker
+/// worker starts from a copy of the loading thread's node ids
+/// (`WorkerSeed`) and counts on its own from then on. Symbol ids come from
+/// the process counter on every thread (`ast::get_symbol_id`); the checkers
+/// run one after another here, so they do not race. The checkers share the
+/// loading thread's synthetic nodes and lazy JSDoc: those keep each node's
+/// handle, which thread-local caches key on.
 #[cfg(target_family = "wasm")]
 struct WorkerIds(crate::ast::IdState);
 
@@ -3564,6 +3615,39 @@ pub fn send_checker_barrier<T: Send + 'static>(signal: impl Fn() -> T) -> usize 
         pool.workers.len()
     })
 }
+
+/// PORT: not in Go (perf). Sends each checker thread of the current
+/// program a job that waits until every checker thread runs it, so a
+/// checker starts the jobs sent after it only when every checker has run
+/// the jobs sent before it. The early emit sends it between the check and
+/// the emit (`execute::incremental::Program::start_emit`): Go emits only
+/// after the whole check, and the emit gives symbol ids from the counter
+/// that the checks share (`ast::get_symbol_id`), so an emit beside a check
+/// would move that check's ids. Does nothing with fewer than 2 checkers.
+#[cfg(not(target_family = "wasm"))]
+pub fn send_checker_rendezvous() {
+    let id = prog().id;
+    POOLS.with(|pools| {
+        let pools = pools.borrow();
+        let Some(pool) = pools.get(&id).filter(|pool| pool.workers.len() > 1) else {
+            return;
+        };
+        let rendezvous = Rendezvous::new(pool.workers.len());
+        for worker in &pool.workers {
+            let (rendezvous, arrival) = (rendezvous.clone(), rendezvous.arrival());
+            // A job that cannot be sent drops its arrival.
+            let _ = worker.send(Box::new(move || {
+                drop(arrival);
+                rendezvous.wait();
+            }));
+        }
+    });
+}
+
+/// wasm: the checkers run their jobs one after another as they are sent
+/// (`send_thread_job`), so every check already ended.
+#[cfg(target_family = "wasm")]
+pub fn send_checker_rendezvous() {}
 
 /// wasm: every job already ran when it was sent (`send_thread_job`), so
 /// each value drops at once.

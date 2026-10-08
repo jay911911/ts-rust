@@ -2579,10 +2579,10 @@ pub const fn is_own_index(index: u32) -> bool {
 /// Where `crate::ast::get_symbol_id` keeps the ids of the symbols of one
 /// arena. Every binder arena of the process (the binder lineage in
 /// `program.rs` and its copies) gives a symbol one id, like Go, where a
-/// bound file keeps its symbols in every program. A checker arena
-/// (`SymbolArena::for_checker`) makes its own symbols (`is_own_index`),
-/// which other checkers do not have, so those symbols have ids of their
-/// own, kept by `key`.
+/// bound file keeps its symbols in every program: the arenas share one
+/// `lineage` table. A checker arena (`SymbolArena::for_checker`) makes its
+/// own symbols (`is_own_index`), which other checkers do not have, so those
+/// symbols have ids of their own, kept by `key`.
 #[derive(Debug)]
 struct SymbolIds {
     /// `COW_CHUNK_LEN`, the index bit of an own symbol, in a checker arena;
@@ -2599,6 +2599,10 @@ struct SymbolIds {
     key: u32,
     /// The shadows in this arena (`SymbolArena::push_shadow`), if any.
     shadows: Option<Box<Shadows>>,
+    /// The ids of the lineage symbols: the table of the lineage arena that
+    /// this arena is or copies. A new arena makes its own, so arenas that
+    /// tests make do not share ids with the process lineage.
+    lineage: Arc<crate::ast::LineageIdTable>,
 }
 
 /// The shadows of one checker arena: copies of symbols of other arenas.
@@ -2612,19 +2616,27 @@ struct Shadows {
 }
 
 impl SymbolIds {
-    /// Every symbol has the shared id of its index.
-    const SHARED: SymbolIds = SymbolIds {
-        own_bit: 0,
-        own_base: 0,
-        lineage_symbols: u32::MAX,
-        lineage_tables: u32::MAX,
-        key: 0,
-        shadows: None,
-    };
+    /// Every symbol has the shared id of its index, in `lineage`.
+    fn shared(lineage: Arc<crate::ast::LineageIdTable>) -> SymbolIds {
+        SymbolIds {
+            own_bit: 0,
+            own_base: 0,
+            lineage_symbols: u32::MAX,
+            lineage_tables: u32::MAX,
+            key: 0,
+            shadows: None,
+            lineage,
+        }
+    }
 
     /// The own symbols (from chunk pair `own_base` on) have ids of their
-    /// own, under a new key.
-    fn own(own_base: u32, lineage_symbols: usize, lineage_tables: usize) -> SymbolIds {
+    /// own, under a new key. The others have the shared ids of `lineage`.
+    fn own(
+        own_base: u32,
+        lineage_symbols: usize,
+        lineage_tables: usize,
+        lineage: Arc<crate::ast::LineageIdTable>,
+    ) -> SymbolIds {
         static NEXT_KEY: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
         SymbolIds {
             own_bit: COW_CHUNK_LEN as u32,
@@ -2633,6 +2645,7 @@ impl SymbolIds {
             lineage_tables: u32::try_from(lineage_tables).expect("table overflow"),
             key: NEXT_KEY.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             shadows: None,
+            lineage,
         }
     }
 
@@ -2662,12 +2675,13 @@ impl Clone for SymbolIds {
     /// other symbols, so they get new ids. Copies of shadows too.
     fn clone(&self) -> Self {
         if self.key == 0 {
-            SymbolIds::SHARED
+            SymbolIds::shared(self.lineage.clone())
         } else {
             SymbolIds::own(
                 self.own_base,
                 self.lineage_symbols as usize,
                 self.lineage_tables as usize,
+                self.lineage.clone(),
             )
         }
     }
@@ -2725,7 +2739,7 @@ impl SymbolArena {
             symbols,
             tables,
             private_names: Vec::new(),
-            ids: SymbolIds::SHARED,
+            ids: SymbolIds::shared(Arc::new(crate::ast::LineageIdTable::new())),
             seen: LineageSeen::default(),
         }
     }
@@ -2754,7 +2768,12 @@ impl SymbolArena {
             symbols,
             tables: self.tables.for_checker(),
             private_names: self.private_names.clone(),
-            ids: SymbolIds::own(own_base, self.symbols.len(), self.tables.len()),
+            ids: SymbolIds::own(
+                own_base,
+                self.symbols.len(),
+                self.tables.len(),
+                self.ids.lineage.clone(),
+            ),
             seen: self.seen,
         }
     }
@@ -2828,6 +2847,22 @@ impl SymbolArena {
             key: self.ids.key,
             place: self.ids.own_place(symbol.0),
         }
+    }
+
+    /// The ids of the lineage symbols (`id_slot` key 0), which every copy
+    /// of this arena's lineage shares.
+    #[inline]
+    #[must_use]
+    pub(crate) fn lineage_ids(&self) -> &crate::ast::LineageIdTable {
+        &self.ids.lineage
+    }
+
+    /// Frees the ids of the symbols at lineage indexes `symbols`, the range
+    /// of dead file version `file` that `free_range` freed in this binder
+    /// lineage arena (`crate::ast::LineageIdTable::free`).
+    pub fn free_symbol_ids(&self, file: usize, symbols: std::ops::Range<usize>) {
+        debug_assert!(self.ids.key == 0, "the lineage is a binder arena");
+        self.ids.lineage.free(file, symbols);
     }
 
     /// The origin of `symbol` when it is a shadow.
@@ -2923,6 +2958,22 @@ impl SymbolArena {
     /// The names given to `note_private_name`, in order.
     pub fn private_names(&self) -> impl Iterator<Item = Name> + '_ {
         self.private_names.iter().map(|&id| Name(id))
+    }
+
+    /// The number of names given to `note_private_name` so far.
+    #[must_use]
+    pub fn private_name_count(&self) -> usize {
+        self.private_names.len()
+    }
+
+    /// Gives an id to the class of each private name noted from `noted`
+    /// on, in order, after a file bound into this binder lineage arena
+    /// (Go binder.go:326, see `PreparedFileArena::private_classes`).
+    pub fn give_private_class_ids(&self, noted: usize) {
+        let names = self.private_names[noted..].iter().map(|&id| Name(id));
+        for class in private_classes(names, |class| class) {
+            crate::ast::get_symbol_id(self, class);
+        }
     }
 
     /// Pushes a new table that holds `entries` in this order and returns
@@ -3167,6 +3218,9 @@ impl SymbolArena {
             ids: _,
             seen: _,
         } = self;
+        let private_classes = private_classes(private_names.iter().map(|&id| Name(id)), |class| {
+            offsets.symbol(class)
+        });
         // The file symbols whose names hold a symbol id.
         // apisym1c: ids move with offset 0 too, from the second chunk on.
         let mut private_symbols = FxHashSet::default();
@@ -3222,13 +3276,15 @@ impl SymbolArena {
             symbols,
             tables,
             offsets,
+            private_classes,
         }
     }
 
     /// Appends a file arena that `prepare_file_arena` prepared with the
     /// offsets that `next_file_offsets` gives now, and returns them. The
     /// new chunks are owned; the caller publishes them (`freeze_since` or
-    /// `share_since`).
+    /// `share_since`). Then it gives the file's classes with private names
+    /// their ids (`PreparedFileArena::private_classes`).
     pub fn append_prepared_file_arena(&mut self, prepared: PreparedFileArena) -> ArenaOffsets {
         let offsets = self.next_file_offsets();
         assert_eq!(
@@ -3239,6 +3295,9 @@ impl SymbolArena {
         // use here.
         self.symbols.append_aligned(prepared.symbols);
         self.tables.append_aligned(prepared.tables);
+        for class in prepared.private_classes {
+            crate::ast::get_symbol_id(self, class);
+        }
         offsets
     }
 
@@ -3438,6 +3497,41 @@ pub struct PreparedFileArena {
     symbols: AlignedChunks<Symbol>,
     tables: AlignedChunks<Table>,
     offsets: ArenaOffsets,
+    /// The classes of the file's private names, as program ids, in the
+    /// order of their first name. Go's binder gives each one its id when it
+    /// names a private member (binder.go:326
+    /// `GetSymbolNameForPrivateIdentifier`), before any checker gives one.
+    /// The port's binder binds a file arena, which has no lineage ids, so
+    /// the join gives them (`SymbolArena::append_prepared_file_arena`).
+    // PORT: Go binds files in parallel (in reverse file order with
+    // `--singleThreaded`), so its order of these ids among files differs.
+    // Only their count reaches output (the digits of later ids).
+    private_classes: Vec<SymbolId>,
+}
+
+/// The classes of private identifier names `names` (see
+/// `SymbolArena::note_private_name`), each mapped by `map`, once each, in
+/// the order of their first name.
+fn private_classes(
+    names: impl Iterator<Item = Name>,
+    map: impl Fn(SymbolId) -> SymbolId,
+) -> Vec<SymbolId> {
+    let mut seen = FxHashSet::default();
+    names
+        .filter_map(|name| private_name_class(&name))
+        .map(map)
+        .filter(|&class| seen.insert(class))
+        .collect()
+}
+
+/// The class symbol that private identifier name `name`
+/// (`<prefix>#<id>@<description>`) holds, or None for another name or the
+/// nil symbol.
+fn private_name_class(name: &Name) -> Option<SymbolId> {
+    let rest = name.strip_prefix(PRIVATE_PREFIX)?;
+    let at = rest.find('@')?;
+    let class = SymbolId(rest[..at].parse::<u32>().ok()?);
+    class.is_some().then_some(class)
 }
 
 /// How the ids of a file arena moved in `SymbolArena::append_file_arena`.
@@ -3519,16 +3613,12 @@ impl ArenaOffsets {
     /// see `SymbolArena::note_private_name`) with its symbol id moved.
     #[cold]
     fn private_name(self, name: &Name) -> Name {
-        let Some(rest) = name.strip_prefix(PRIVATE_PREFIX) else {
+        let Some(class) = private_name_class(name) else {
             return name.clone();
         };
-        let Some(at) = rest.find('@') else {
-            return name.clone();
-        };
-        let Ok(id) = rest[..at].parse::<u32>() else {
-            return name.clone();
-        };
-        let moved = self.symbol(SymbolId(id));
+        let rest = &name[PRIVATE_PREFIX.len()..];
+        let at = rest.find('@').expect("a private name has an @");
+        let moved = self.symbol(class);
         Name::from(format!("{PRIVATE_PREFIX}{}{}", moved.0, &rest[at..]))
     }
 }

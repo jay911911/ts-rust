@@ -836,6 +836,7 @@ fn end_by_signal(signal: i32) {
 /// Ends the process with `code` once the work has written its output. A
 /// worker (see `launch`) flushes stdout and sends the code (`send_code`).
 fn exit(code: i32) -> ! {
+    ts_goport::ast::print_symbol_id_counts();
     #[cfg(target_os = "linux")]
     if let Some(worker) = worker() {
         let _ = std::io::stdout().flush();
