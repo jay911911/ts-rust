@@ -1651,12 +1651,16 @@ mod tests {
     use super::*;
     use crate::frontend::parser::{SourceFileParseOptions, parse_source_file};
 
-    fn first_declaration(source: &'static str) -> Node {
+    fn parse_root(file_name: &str, source: &'static str, kind: ScriptKind) -> Node {
         let opts = SourceFileParseOptions {
-            file_name: "/test.ts".to_string(),
+            file_name: file_name.to_string(),
             ..Default::default()
         };
-        let root = parse_source_file(&opts, source, ScriptKind::TS).root;
+        parse_source_file(&opts, source, kind).root
+    }
+
+    fn first_declaration(source: &'static str) -> Node {
+        let root = parse_root("/test.ts", source, ScriptKind::TS);
         let statement = root.statements().get(0);
         statement.declaration_list().declarations().nodes().get(0)
     }
@@ -1733,6 +1737,39 @@ mod tests {
                 "/** other */\n/** @stability unstable */\nexport const api = 1",
                 "unstable",
             ),
+            // The JSDoc parser takes these as whitespace and parses the tag,
+            // but the scan's `hasJSDocTag` does not, so the tag is not read
+            // (effect-tsgo 0.51.1 gives no usage warning).
+            (
+                "no-break space after the tag",
+                "/** @stability\u{a0}unstable */\nexport const api = 1",
+                "",
+            ),
+            (
+                "vertical tab after the tag",
+                "/** @stability\u{b}unstable */\nexport const api = 1",
+                "",
+            ),
+            (
+                "form feed after the tag",
+                "/** @stability\u{c}unstable */\nexport const api = 1",
+                "",
+            ),
+            (
+                "line separator after the tag",
+                "/** @stability\u{2028}unstable */\nexport const api = 1",
+                "",
+            ),
+            (
+                "line feed after the tag",
+                "/** @stability\n * unstable */\nexport const api = 1",
+                "unstable",
+            ),
+            (
+                "CRLF after the tag",
+                "/** @stability\r\n * unstable */\nexport const api = 1",
+                "unstable",
+            ),
         ];
         for (name, source, want) in tests {
             let declaration = first_declaration(source);
@@ -1749,19 +1786,58 @@ mod tests {
     /// of the property signature.
     #[test]
     fn stability_of_same_line_property_signature() {
-        let opts = SourceFileParseOptions {
-            file_name: "/test.ts".to_string(),
-            ..Default::default()
-        };
-        let root = parse_source_file(
-            &opts,
+        let root = parse_root(
+            "/test.ts",
             "export interface I { /** @stability unstable */ a: string\n /** @stability experimental */\n b: string }",
             ScriptKind::TS,
-        )
-        .root;
+        );
         let members = root.statements().get(0).members();
         assert_eq!(stability_tag_of_declaration(members.get(0)), "");
         assert_eq!(stability_tag_of_declaration(members.get(1)), "experimental");
+    }
+
+    /// A JS `@typedef` or `@callback` is reparsed into a type alias that
+    /// shares the comment's JSDoc, but the scan starts at the alias, inside
+    /// the comment, so its `@stability` tag is not read. `ident` reads every
+    /// JSDoc comment before it in order, so the first tag (`unstable`) wins.
+    /// The answers are effect-tsgo 0.51.1's usage warnings for this file.
+    #[test]
+    fn stability_of_js_typedef() {
+        let root = parse_root(
+            "/index.js",
+            "/**\n * @typedef {{ a: number }} Foo\n * @stability unstable\n */\n\
+             /**\n * @stability unstable\n * @callback Cb\n * @param {number} x\n * @returns {void}\n */\n\
+             /**\n * @stability experimental\n * @template T\n * @param {T} x\n * @returns {T}\n */\n\
+             export function ident(x) { return x }\n\
+             /** @stability unstable */\nexport class K {\n  /** @stability experimental */\n  m() {}\n}\n",
+            ScriptKind::JS,
+        );
+        let mut got = Vec::new();
+        for statement in root.statements() {
+            got.push((
+                statement.name().text().to_string(),
+                stability_tag_of_declaration(statement),
+            ));
+            if statement.kind() == SyntaxKind::ClassDeclaration {
+                let member = statement.members().get(0);
+                got.push((
+                    member.name().text().to_string(),
+                    stability_tag_of_declaration(member),
+                ));
+            }
+        }
+        let want = [
+            ("Foo", ""),
+            ("Cb", ""),
+            ("ident", "unstable"),
+            ("K", "unstable"),
+            ("m", "experimental"),
+        ];
+        let want: Vec<(String, String)> = want
+            .iter()
+            .map(|(name, tag)| (name.to_string(), tag.to_string()))
+            .collect();
+        assert_eq!(got, want);
     }
 
     #[test]
