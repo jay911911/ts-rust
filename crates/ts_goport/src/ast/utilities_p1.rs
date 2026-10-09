@@ -39,6 +39,7 @@ static NEXT_SYMBOL_ID: SymbolIdCounter = SymbolIdCounter(AtomicU64::new(0));
 
 /// Go `nextSymbolId.Add(1)`. Relaxed: the id carries no other data, and the
 /// ids of one thread still go up.
+#[inline(always)]
 fn next_symbol_id() -> u64 {
     SYMBOL_IDS_GIVEN_HERE.with(|given| given.set(given.get() + 1));
     NEXT_SYMBOL_ID.0.fetch_add(1, Ordering::Relaxed) + 1
@@ -97,7 +98,11 @@ const BIG_ID: IdCell = IdCell::MAX;
 
 /// The id in `cell`, assigned now when it has none. `big` keeps ids from
 /// `BIG_ID` on, by `place`.
-#[inline]
+// PERF: always inline, as the id reads inlined it before trunc2. Out of
+// line (the shared counter made it larger), its call showed in profiles of
+// effect --singleThreaded (trunc2 round 2). Ids from `BIG_ID` on go out of
+// line.
+#[inline(always)]
 fn cell_id<K: Eq + std::hash::Hash>(
     cell: &mut IdCell,
     big: &mut FxHashMap<K, u64>,
@@ -109,16 +114,33 @@ fn cell_id<K: Eq + std::hash::Hash>(
             count_id(|counts| &counts.own);
             match IdCell::try_from(id) {
                 Ok(small) if small != BIG_ID => *cell = small,
-                _ => {
-                    *cell = BIG_ID;
-                    big.insert(place, id);
-                }
+                _ => set_big_id(cell, big, place, id),
             }
             id
         }
-        BIG_ID => big[&place],
+        BIG_ID => big_id(big, &place),
         id => u64::from(id),
     }
+}
+
+/// `cell_id` of an id from `BIG_ID` on: keeps it in `big`.
+#[cold]
+#[inline(never)]
+fn set_big_id<K: Eq + std::hash::Hash>(
+    cell: &mut IdCell,
+    big: &mut FxHashMap<K, u64>,
+    place: K,
+    id: u64,
+) {
+    *cell = BIG_ID;
+    big.insert(place, id);
+}
+
+/// `cell_id` of a cell that holds `BIG_ID`: the id in `big`.
+#[cold]
+#[inline(never)]
+fn big_id<K: Eq + std::hash::Hash>(big: &FxHashMap<K, u64>, place: &K) -> u64 {
+    big[place]
 }
 
 /// The symbols of one `SymbolArena` chunk (core.rs `COW_CHUNK_LEN`), so a
