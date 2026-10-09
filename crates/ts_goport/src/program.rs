@@ -3433,10 +3433,10 @@ fn create_checkers() -> CheckerPool {
 }
 
 /// Checker threads that wait for each other between two phases, as Go's
-/// `WorkGroup.RunAndWait` makes the checkers wait. Each of `count`
-/// arrivals (`Arrival`) arrives when it drops: when its thread ends the
-/// first phase, when that thread panics, or when a job that holds it never
-/// runs. `wait` returns when all have arrived.
+/// `WorkGroup.RunAndWait` makes the checkers wait (`start_checkers`). Each
+/// of `count` arrivals (`Arrival`) arrives when it drops: when its thread
+/// ends the first phase, or when that thread panics. `wait` returns when
+/// all have arrived.
 #[cfg(not(target_family = "wasm"))]
 struct Rendezvous {
     /// The arrivals still to come.
@@ -3615,39 +3615,6 @@ pub fn send_checker_barrier<T: Send + 'static>(signal: impl Fn() -> T) -> usize 
         pool.workers.len()
     })
 }
-
-/// PORT: not in Go (perf). Sends each checker thread of the current
-/// program a job that waits until every checker thread runs it, so a
-/// checker starts the jobs sent after it only when every checker has run
-/// the jobs sent before it. The early emit sends it between the check and
-/// the emit (`execute::incremental::Program::start_emit`): Go emits only
-/// after the whole check, and the emit gives symbol ids from the counter
-/// that the checks share (`ast::get_symbol_id`), so an emit beside a check
-/// would move that check's ids. Does nothing with fewer than 2 checkers.
-#[cfg(not(target_family = "wasm"))]
-pub fn send_checker_rendezvous() {
-    let id = prog().id;
-    POOLS.with(|pools| {
-        let pools = pools.borrow();
-        let Some(pool) = pools.get(&id).filter(|pool| pool.workers.len() > 1) else {
-            return;
-        };
-        let rendezvous = Rendezvous::new(pool.workers.len());
-        for worker in &pool.workers {
-            let (rendezvous, arrival) = (rendezvous.clone(), rendezvous.arrival());
-            // A job that cannot be sent drops its arrival.
-            let _ = worker.send(Box::new(move || {
-                drop(arrival);
-                rendezvous.wait();
-            }));
-        }
-    });
-}
-
-/// wasm: the checkers run their jobs one after another as they are sent
-/// (`send_thread_job`), so every check already ended.
-#[cfg(target_family = "wasm")]
-pub fn send_checker_rendezvous() {}
 
 /// wasm: every job already ran when it was sent (`send_thread_job`), so
 /// each value drops at once.
