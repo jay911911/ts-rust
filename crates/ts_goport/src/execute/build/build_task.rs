@@ -1123,7 +1123,7 @@ impl BuildTask {
         let (mut result, statistics) = {
             let _scope = crate::core::enter_program(Some(program));
             WRITE_FILE_SYS.with(|write_file_sys| *write_file_sys.borrow_mut() = Some(sys.clone()));
-            // PORT: perf. Each checker emits when its own check ends, as in
+            // PORT: perf. Each checker emits once every check ends, as in
             // `tsc -p` (`Program::start_check_and_emit`), with the options of
             // the emit call in `EmitFilesAndReportErrors` (the same
             // `WriteFile`). `EmitAndReportStatistics` makes the same calls

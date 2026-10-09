@@ -864,7 +864,8 @@ process (bin/tsgo.rs `unblock_go_signals`, `go_runtime_start`).
   binds file arenas, so the file's join into the lineage gives them
   (`PreparedFileArena::private_classes`). A pool's checkers wait for each
   other after `Checker::new` (Go `createCheckers` `RunAndWait`; a
-  `NewChecker` gives 4 or more ids). Late-bound names hold ids
+  `NewChecker` gives 4 or more ids), and the early emit waits for every
+  check (`program::send_checker_rendezvous`). Late-bound names hold ids
   (`__@k@<id>`), and the node builder counts their length toward
   truncation. So with more than one checker (the default pool, parallel
   `tsc -b`, the language server), the digits of those ids, and so where
@@ -875,12 +876,6 @@ process (bin/tsgo.rs `unblock_go_signals`, `go_runtime_start`).
     reverse file order with `--singleThreaded`). Only their count reaches
     output.
   - Node ids stay per thread. No output that we compare holds one.
-  - The early emit of `tsc -p` (below) does not wait for the other
-    checkers: with 2 or more checkers, each checker emits when its own
-    check ends. Its declaration emit gives ids, so a slower checker's
-    check ids can be higher than any that Go gives them, where Go gives
-    every emit id after every check id. `GOPORT_EARLY_EMIT=0` keeps Go's
-    order. A wait cost about 1.2% of an emit build (trunc2 round 1).
   - With `skipLibCheck`, the first use of a `Symbol.<x>` member (a
     well-known symbol, or a unique symbol that a file adds to
     `SymbolConstructor`) makes Go give the members of `SymbolConstructor`
@@ -977,12 +972,13 @@ process (bin/tsgo.rs `unblock_go_signals`, `go_runtime_start`).
   in Go; `incremental::Program::start_check_and_emit`). Go waits for the
   whole check, reads the global diagnostics again, then emits. Here the
   loading thread sends each checker its check job, its global diagnostics
-  job and its emit jobs in that order, with no wait on the loading thread,
-  and the pool jobs go out at the same time. Each checker thread runs the
-  same jobs in the same order as with the waits. Each checker emits when
-  its own check ends, so its emit ids can come before a slower checker's
-  check ids (see the symbol ids above); the pool emits the JS parts during
-  the check. All state
+  job, a wait for the other checkers (`program::send_checker_rendezvous`)
+  and its emit jobs in that order, with no wait on the loading thread, and
+  the pool jobs go out at the same time. Each checker thread runs the same
+  jobs in the same order as with the waits. With 2 or more checkers each
+  checker emits once every check ends, as in Go, because the emit gives
+  symbol ids from the counter that the checks share; the pool emits the JS
+  parts during the check. All state
   that emit writes is per thread, per checker, per emit, loading thread
   only or a pure cache, except the file system: a check can probe files
   (the TS2834/TS2835 import extension suggestion, module specifiers in type

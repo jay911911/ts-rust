@@ -381,7 +381,7 @@ pub fn start_emit_batch_with(
 /// PORT: not in Go (perf). True when `tsc -p` or `tsc -b` with an
 /// incremental program may send the emit of the current program right
 /// behind its check (`execute::incremental::Program::start_emit`): each
-/// checker then emits when its own check ends, and the emit pool runs
+/// checker then emits once every check ends, and the emit pool runs
 /// during the check. Go waits for the whole check before it emits. Each
 /// checker still
 /// gets the same jobs in the same order, and all state that emit writes is

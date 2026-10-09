@@ -441,8 +441,8 @@ impl Program {
     ///
     /// Go waits for the whole check, then emits. Here each checker thread
     /// gets the same jobs in the same order (check, emit), and runs its emit
-    /// when its own check ends. The emit pool runs the JS parts during the
-    /// check. `emit` waits for the emit. `options` must be the
+    /// once every checker ends its check (`start_emit` sends a wait). The
+    /// emit pool runs the JS parts during the check. `emit` waits for the emit. `options` must be the
     /// options of that `emit` call: no target file, `EmitOnly::All` and the
     /// same `WriteFile`.
     pub fn start_check_and_emit(&self, options: EmitOptions) {
@@ -508,6 +508,9 @@ impl Program {
             let global_diagnostics = get_global_diagnostics();
             self.started.borrow_mut().global_diagnostics = Some(global_diagnostics);
         }
+        // Go emits after the whole check. The emit gives symbol ids, which
+        // must come after every check's ids, as in Go.
+        crate::program::send_checker_rendezvous();
         let emit = start_emit_files(self, options);
         self.started.borrow_mut().emit = Some(emit);
     }

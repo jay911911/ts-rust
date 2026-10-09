@@ -616,7 +616,7 @@ fn program_options(host: Rc<dyn CompilerHost>, config: Rc<ParsedCommandLine>) ->
 // PORT: perf. The incremental program sends its check, and when it can,
 // the emit, before
 // `EmitAndReportStatistics` (`Program::start_check_and_emit`). Each checker
-// then emits when its own check ends. `EmitAndReportStatistics` makes the
+// then emits once every check ends. `EmitAndReportStatistics` makes the
 // same calls as in Go and waits for that work. Its check time is the time
 // that `start_check` spent on the affected files plus the wait for the
 // check (`Program::take_started_check_time`), and its emit time the wait
