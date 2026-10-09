@@ -9,6 +9,7 @@ pub mod abort_controller_in_effect;
 pub mod acquire_release_disposable;
 pub mod all_of_map_to_for_each;
 pub mod any_unknown_in_error_context;
+pub mod api_stability_leak;
 pub mod async_function;
 pub mod catch_all_tag_dispatch_to_catch_tag;
 pub mod catch_all_to_map_error;
@@ -120,6 +121,7 @@ pub mod unsafe_effect_type_assertion;
 
 /// Go `rules.All`.
 pub static ALL: &[&Rule] = &[
+    &api_stability_leak::API_STABILITY_LEAK,
     &stability_api_usage::EXPERIMENTAL_API_USAGE,
     &stability_api_usage::UNSTABLE_API_USAGE,
     &floating_effect::FLOATING_EFFECT,

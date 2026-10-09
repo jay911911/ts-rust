@@ -1,5 +1,5 @@
-//! Port of Effect-TS/tsgo `internal/typeparser` at `@effect/tsgo@0.46.1`
-//! (`f1a7cad0`). It recognizes Effect values, services, layers, schemas and
+//! Port of Effect-TS/tsgo `internal/typeparser` at `@effect/tsgo@0.51.1`
+//! (`47cb1ed7`). It recognizes Effect values, services, layers, schemas and
 //! call shapes from checker types. One file per Go file, in Go order.
 //!
 //! Go `Cached(&tp.links.X, key, compute)` is `cached!(self, x, key, compute)`.
